@@ -122,7 +122,7 @@ ACC (Shared Memory / UDP) -> Telemetry Collector -> Stream Processor -> Feedback
   "severity": "warning",
   "lap": 12,
   "section": "Curva 5",
-  "message": "Frana 4 m piu tardi e modula il rilascio del freno al 30%",
+  "message": "Frena 4 m piu tardi e modula il rilascio del freno al 30%",
   "metrics": {
     "brake_point_delta_m": -4.1,
     "speed_entry_delta_kph": -6.5

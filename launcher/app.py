@@ -1,11 +1,14 @@
 from __future__ import annotations
+from datetime import datetime
 
 import asyncio
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -51,8 +54,8 @@ def ensure_runtime_dependencies() -> None:
 ensure_runtime_dependencies()
 
 
-from PySide6.QtCore import QObject, QSize, Qt, QThread, Signal  # noqa: E402  pylint: disable=wrong-import-position
-from PySide6.QtGui import QCloseEvent, QPixmap, QIcon  # noqa: E402  pylint: disable=wrong-import-position
+from PySide6.QtCore import QObject, QSize, Qt, QThread, Signal, QEasingCurve, QPropertyAnimation, QTimer  # noqa: E402  pylint: disable=wrong-import-position
+from PySide6.QtGui import QCloseEvent, QPixmap, QIcon, QIntValidator  # noqa: E402  pylint: disable=wrong-import-position
 from PySide6.QtWidgets import (  # noqa: E402  pylint: disable=wrong-import-position
     QApplication,
     QFileDialog,
@@ -71,6 +74,7 @@ from PySide6.QtWidgets import (  # noqa: E402  pylint: disable=wrong-import-posi
     QWidget,
     QComboBox,
     QFrame,
+    QSizePolicy,
     QCheckBox,
     QTableWidget,
     QTableWidgetItem,
@@ -78,6 +82,10 @@ from PySide6.QtWidgets import (  # noqa: E402  pylint: disable=wrong-import-posi
     QListWidget,
     QAbstractItemView,
     QListWidgetItem,
+    QAbstractButton,
+    QRadioButton,
+    QButtonGroup,
+    QTabWidget,
 )
 
 from services.analytics.engine import RealtimeAnalyticsEngine  # noqa: E402  pylint: disable=wrong-import-position
@@ -96,6 +104,9 @@ DEFAULT_VALUES: Dict[str, str] = {
     "TTS_PROVIDER": "elevenlabs",
     "ELEVENLABS_API_KEY": "",
     "TTS_OUTPUT_DIR": "data/audio",
+    "ACC_USE_LIVE": "1",
+    "ACC_UDP_HOST": "127.0.0.1",
+    "ACC_UDP_PORT": "9000",
     "REPO_ZIP_URL": "https://github.com/<user>/acc_coach_ai/archive/refs/heads/main.zip",
     "INSTALL_DIR": str((Path.home() / "ACC_Coach_AI").resolve()),
 }
@@ -103,19 +114,23 @@ DEFAULT_VALUES: Dict[str, str] = {
 ENV_FIELDS = [
     ("GOOGLE_API_KEY", "Google AI Studio API Key"),
     ("ELEVENLABS_API_KEY", "ElevenLabs API Key"),
-    ("TTS_OUTPUT_DIR", "Cartella output TTS"),
 ]
 
-PRIMARY_BG = "#050505"
-SECONDARY_BG = "#090909"
-CARD_BG = "#101010"
-ACCENT_RED = "#4E0000"
-ACCENT_RED_HOVER = "#660000"
-ACCENT_GLOW = "#8c1a1a"
-TEXT_PRIMARY = "#f2f2f2"
-TEXT_MUTED = "#9b9b9b"
+PRIMARY_BG = "#0E0E10"
+SECONDARY_BG = "#1E1E24"
+CARD_BG = "#1E1E24"
+SURFACE_MEDIUM = "#1E1E24"
+SURFACE_BORDER = "#2A2C33"
+ACCENT_RED = "#9C2A23"
+ACCENT_RED_HOVER = "#D23B3B"
+ACCENT_GLOW = "#D36255"
+TEXT_PRIMARY = "#E9EAEC"
+TEXT_MUTED = "#9EA3A8"
+SUCCESS_GREEN = "#21BA75"
+WARNING_AMBER = "#F0B429"
 
 APP_ICON_FILENAME = "acc_icon_png.png"
+FALLBACK_ICON_FILENAME = "acc_icon.ico"
 
 
 def resource_path() -> Path:
@@ -135,6 +150,9 @@ def load_app_icon() -> QIcon:
         pix = QPixmap(str(path))
         if not pix.isNull():
             icon = QIcon(pix)
+    if icon.isNull():
+        fallback = resource_path() / "resources" / FALLBACK_ICON_FILENAME
+        icon = QIcon(str(fallback))
     return icon
 
 
@@ -152,7 +170,15 @@ def load_app_pixmap(size: int) -> QPixmap:
     pm = icon.pixmap(size, size)
     if not pm.isNull():
         return pm
-    return QPixmap()
+    fallback = QPixmap(str(resource_path() / "resources" / FALLBACK_ICON_FILENAME))
+    if not fallback.isNull() and size > 0:
+        return fallback.scaled(
+            size,
+            size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+    return fallback
 
 
 def load_lap_analysis_data(env_manager: EnvManager) -> dict[str, dict[str, dict]]:
@@ -248,20 +274,30 @@ class EnvManager:
         self.load()
 
     def load(self) -> None:
-        env_file = resource_path() / ".env"
-        if not env_file.exists():
-            return
-        for line in env_file.read_text(encoding="utf-8").splitlines():
-            if not line or "=" not in line or line.strip().startswith("#"):
-                continue
-            key, value = line.split("=", 1)
-            self.values[key.strip()] = value.strip()
+        self._load_env_file(resource_path() / ".env")
+        install_dir = self.get_install_dir()
+        self._load_env_file(install_dir / ".env")
+        infra_env = install_dir / "infrastructure" / ".env"
+        self._load_env_file(infra_env)
         # Backward compatibility: migrate legacy OpenAI keys to Google AI Studio
         legacy_key = self.values.pop("OPENAI_API_KEY", "").strip()
         if legacy_key and not self.values.get("GOOGLE_API_KEY"):
             self.values["GOOGLE_API_KEY"] = legacy_key
         # Remove deprecated OpenAI model entry if present
         self.values.pop("OPENAI_MODEL", None)
+
+    def _load_env_file(self, env_file: Path) -> None:
+        if not env_file.exists():
+            return
+        try:
+            lines = env_file.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            return
+        for line in lines:
+            if not line or "=" not in line or line.strip().startswith("#"):
+                continue
+            key, value = line.split("=", 1)
+            self.values[key.strip()] = value.strip()
 
     def save(self) -> None:
         env_file = resource_path() / ".env"
@@ -318,22 +354,29 @@ class ServiceController(QObject):
         self.analytics: Optional[RealtimeAnalyticsEngine] = None
         self.running = False
 
-    def start(self, simulation_file: Path) -> None:
+    @property
+    def is_running(self) -> bool:
+        return self.running
+
+    def start(self, config: CollectorConfig) -> None:
         if self.running:
-            self.status_changed.emit("Servizi gia attivi")
+            self.status_changed.emit("Sessione gia attiva")
             return
-        if not simulation_file.exists():
-            self.status_changed.emit(f"File simulazione non trovato: {simulation_file}")
-            return
+        if config.mode == CollectorMode.SIMULATION:
+            sim_path = Path(config.simulation_file or "")
+            if not sim_path.exists():
+                self.status_changed.emit(f"File simulazione non trovato: {sim_path}")
+                return
 
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
-        future = asyncio.run_coroutine_threadsafe(self._async_start(simulation_file), self.loop)
+        future = asyncio.run_coroutine_threadsafe(self._async_start(config), self.loop)
         future.add_done_callback(self._handle_future)
 
     def stop(self) -> None:
         if not self.running or not self.loop:
+            self.status_changed.emit("Sessione non attiva")
             return
 
         async def _stop() -> None:
@@ -351,7 +394,7 @@ class ServiceController(QObject):
         self.loop = None
         self.thread = None
         self.running = False
-        self.status_changed.emit("Servizi fermati")
+        self.status_changed.emit("Sessione terminata")
 
     def _run_loop(self) -> None:
         if not self.loop:
@@ -365,19 +408,18 @@ class ServiceController(QObject):
         except Exception as exc:
             self.status_changed.emit(f"Errore avvio servizi: {exc}")
 
-    async def _async_start(self, simulation_file: Path) -> None:
+    async def _async_start(self, config: CollectorConfig) -> None:
         self.analytics = RealtimeAnalyticsEngine(on_feedback=self._on_feedback)
         await self.analytics.start()
-        config = CollectorConfig(
-            mode=CollectorMode.SIMULATION,
-            simulation_file=str(simulation_file),
-            loop_simulation=True,
-            playback_rate=1.0,
-        )
         self.collector = TelemetryCollector()
         await self.collector.start(config)
         self.running = True
-        self.status_changed.emit("Servizi avviati (simulazione)")
+        if config.mode == CollectorMode.UDP:
+            self.status_changed.emit("Sessione live ACC avviata")
+        elif config.mode == CollectorMode.SIMULATION:
+            self.status_changed.emit("Sessione simulata avviata")
+        else:
+            self.status_changed.emit(f"Sessione avviata ({config.mode.value})")
 
     def _on_feedback(self, event: dict) -> None:
         self.feedback_received.emit(event)
@@ -510,6 +552,7 @@ class Sidebar(QWidget):
 
         for key, label in items.items():
             btn = SidebarButton(label)
+            btn.setAccessibleName(f"Vai a {label}")
             btn.clicked.connect(lambda _checked, k=key: self._on_select(k))
             self.buttons[key] = btn
             layout.addWidget(btn)
@@ -526,25 +569,62 @@ class Sidebar(QWidget):
     def select(self, key: str) -> None:
         for name, button in self.buttons.items():
             button.setChecked(name == key)
+            button.setAccessibleDescription("Pagina attuale" if name == key else "")
 
 
-def build_card(title: str, value: str, subtitle: str = "") -> QFrame:
+def build_card(
+    title: str,
+    value: str,
+    subtitle: str = "",
+    unit: str = "",
+    trend: Optional[str] = None,
+    status_color: Optional[str] = None,
+) -> QFrame:
     frame = QFrame()
     frame.setObjectName("card")
     frame.setFrameShape(QFrame.Shape.NoFrame)
+    if status_color:
+        frame.setProperty("statusColor", status_color)
     layout = QVBoxLayout(frame)
-    layout.setContentsMargins(22, 20, 22, 20)
+    layout.setContentsMargins(24, 22, 24, 22)
+    layout.setSpacing(14)
     title_label = QLabel(title)
     title_label.setStyleSheet(
-        f"color: {TEXT_MUTED}; font-size: 14px; text-transform: uppercase; letter-spacing: 0.08em;"
+        f"color: {TEXT_MUTED}; font-size: 13px; text-transform: uppercase; letter-spacing: 0.12em;"
     )
-    layout.addWidget(title_label)
+    header_row = QHBoxLayout()
+    header_row.setContentsMargins(0, 0, 0, 0)
+    header_row.addWidget(title_label, alignment=Qt.AlignmentFlag.AlignLeft)
+    header_row.addStretch(1)
+    status_dot = QLabel("●")
+    status_dot.setObjectName("statusDot")
+    if status_color:
+        status_dot.setStyleSheet(f"color: {status_color}; font-size: 16px;")
+    else:
+        status_dot.hide()
+    header_row.addWidget(status_dot, alignment=Qt.AlignmentFlag.AlignRight)
+    layout.addLayout(header_row)
+    value_row = QHBoxLayout()
+    value_row.setContentsMargins(0, 0, 0, 0)
+    value_row.setSpacing(8)
     value_label = QLabel(value)
     value_label.setObjectName("cardValue")
-    value_label.setStyleSheet(f"color: {ACCENT_RED};")
-    layout.addWidget(value_label)
+    value_label.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 36px; font-weight: 700;")
+    value_row.addWidget(value_label, alignment=Qt.AlignmentFlag.AlignVCenter)
+    if unit:
+        unit_label = QLabel(unit)
+        unit_label.setObjectName("cardUnit")
+        unit_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 14px; font-weight: 500;")
+        value_row.addWidget(unit_label, alignment=Qt.AlignmentFlag.AlignBottom)
+    value_row.addStretch(1)
+    if trend:
+        trend_label = QLabel(trend)
+        trend_label.setObjectName("cardTrend")
+        trend_label.setStyleSheet(f"color: {SUCCESS_GREEN if trend.startswith('▲') else ACCENT_GLOW}; font-size: 13px;")
+        value_row.addWidget(trend_label, alignment=Qt.AlignmentFlag.AlignBottom)
+    layout.addLayout(value_row)
     subtitle_label = QLabel(subtitle)
-    subtitle_label.setStyleSheet(f"font-size: 14px; color: {TEXT_MUTED};")
+    subtitle_label.setStyleSheet(f"font-size: 14px; color: {TEXT_MUTED}; font-weight: 500;")
     layout.addWidget(subtitle_label)
     layout.addStretch(1)
     return frame
@@ -556,7 +636,7 @@ class HomePage(QWidget):
         self.env_manager = env_manager
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(24)
+        layout.setSpacing(28)
 
         self.banner = QFrame()
         self.banner.setObjectName("banner")
@@ -575,17 +655,17 @@ class HomePage(QWidget):
             logo_label.setText("ACC Coach AI")
             logo_label.setStyleSheet("font-size: 22px; font-weight: 700; letter-spacing: 0.05em;")
         logo_row.addWidget(logo_label, alignment=Qt.AlignmentFlag.AlignLeft)
-        self.banner_title = QLabel("Benvenuto nel tuo coach virtuale")
+        self.banner_title = QLabel("Dashboard")
         self.banner_title.setObjectName("bannerTitle")
-        self.banner_title.setStyleSheet("font-size: 28px; font-weight: 700;")
+        self.banner_title.setStyleSheet("font-size: 30px; font-weight: 700; letter-spacing: 0.02em;")
         logo_row.addWidget(self.banner_title, alignment=Qt.AlignmentFlag.AlignLeft)
         logo_row.addStretch(1)
         banner_layout.addLayout(logo_row)
-        self.banner_subtitle = QLabel("Configura le API key per sbloccare le funzionalita avanzate.")
-        self.banner_subtitle.setStyleSheet(f"font-size: 15px; color: {TEXT_MUTED};")
+        self.banner_subtitle = QLabel("Benvenuto nel tuo coach virtuale")
+        self.banner_subtitle.setStyleSheet(f"font-size: 16px; color: {TEXT_MUTED}; font-weight: 500;")
         banner_layout.addWidget(self.banner_subtitle)
         self.alert_label = QLabel("")
-        self.alert_label.setStyleSheet(f"font-size: 13px; color: {ACCENT_GLOW};")
+        self.alert_label.setStyleSheet(f"font-size: 13px; color: {ACCENT_GLOW}; margin-top: 8px;")
         banner_layout.addWidget(self.alert_label)
         layout.addWidget(self.banner)
 
@@ -594,83 +674,203 @@ class HomePage(QWidget):
         cards_layout.setContentsMargins(0, 0, 0, 0)
         cards_layout.setSpacing(18)
 
-        self.card_session = build_card("Ultima sessione", "-", "Nessuna sessione registrata")
-        self.card_laps = build_card("Giri completati", "-", "Giri")
-        self.card_best_lap = build_card("Miglior giro", "-", "Tempo")
-
-        self.consistency_card = QFrame()
-        self.consistency_card.setObjectName("card")
-        self.consistency_card.setFrameShape(QFrame.Shape.NoFrame)
-        cons_layout = QVBoxLayout(self.consistency_card)
-        cons_layout.setContentsMargins(18, 16, 18, 16)
-        cons_title = QLabel("Consistenza")
-        cons_title.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 14px; text-transform: uppercase; letter-spacing: 0.06em;")
-        cons_layout.addWidget(cons_title)
-        self.consistency_bar = QProgressBar()
-        self.consistency_bar.setRange(0, 100)
-        self.consistency_bar.setFormat("%p%")
-        self.consistency_bar.setTextVisible(True)
-        self.consistency_bar.setStyleSheet(
-            "QProgressBar {background-color: #141414; border: 0px; height: 16px; border-radius: 8px;}"
-            f"QProgressBar::chunk {{background: {ACCENT_RED}; border-radius: 8px;}}"
+        self.card_session = build_card(
+            "Ultima sessione", "-", "Nessuna sessione registrata", unit="", status_color=WARNING_AMBER
         )
-        cons_layout.addWidget(self.consistency_bar)
-
-        self.efficiency_card = QFrame()
-        self.efficiency_card.setObjectName("card")
-        self.efficiency_card.setFrameShape(QFrame.Shape.NoFrame)
-        eff_layout = QVBoxLayout(self.efficiency_card)
-        eff_layout.setContentsMargins(18, 16, 18, 16)
-        eff_title = QLabel("Efficienza")
-        eff_title.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 14px; text-transform: uppercase; letter-spacing: 0.06em;")
-        eff_layout.addWidget(eff_title)
-        self.efficiency_bar = QProgressBar()
-        self.efficiency_bar.setRange(0, 100)
-        self.efficiency_bar.setFormat("%p%")
-        self.efficiency_bar.setTextVisible(True)
-        self.efficiency_bar.setStyleSheet(
-            "QProgressBar {background-color: #141414; border: 0px; height: 16px; border-radius: 8px;}"
-            f"QProgressBar::chunk {{background: {ACCENT_RED_HOVER}; border-radius: 8px;}}"
-        )
-        eff_layout.addWidget(self.efficiency_bar)
+        self.card_laps = build_card("Giri completati", "-", "Ultima sessione", unit="giri", status_color=SUCCESS_GREEN)
+        self.card_best_lap = build_card("Miglior giro", "-", "Tempo", unit="ms", status_color=ACCENT_RED_HOVER)
 
         cards_layout.addWidget(self.card_session, 0, 0, 1, 2)
         cards_layout.addWidget(self.card_laps, 0, 2)
         cards_layout.addWidget(self.card_best_lap, 0, 3)
-        cards_layout.addWidget(self.consistency_card, 1, 0, 1, 2)
-        cards_layout.addWidget(self.efficiency_card, 1, 2, 1, 2)
-
+        for col in range(4):
+            cards_layout.setColumnStretch(col, 1)
+        cards_layout.setRowMinimumHeight(0, 140)
         layout.addWidget(cards_widget)
 
+        sections_row = QHBoxLayout()
+        sections_row.setContentsMargins(0, 0, 0, 0)
+        sections_row.setSpacing(24)
+        self.session_preview = self._build_session_preview()
+        self.analysis_preview = self._build_analysis_preview()
+        sections_row.addWidget(self.session_preview, stretch=3)
+        sections_row.addWidget(self.analysis_preview, stretch=2)
+        layout.addLayout(sections_row)
+
+        bars_row = QHBoxLayout()
+        bars_row.setContentsMargins(0, 0, 0, 0)
+        bars_row.setSpacing(24)
+        self.consistency_card, self.consistency_bar = self._build_progress_card("Consistenza", ACCENT_RED)
+        self.efficiency_card, self.efficiency_bar = self._build_progress_card("Efficienza", ACCENT_RED_HOVER)
+        bars_row.addWidget(self.consistency_card, stretch=1)
+        bars_row.addWidget(self.efficiency_card, stretch=1)
+        layout.addLayout(bars_row)
+
     def update_metrics(self, metrics: Optional[Dict[str, str]], api_ready: bool) -> None:
+        self.set_api_ready(api_ready)
         if not api_ready:
             self.alert_label.setText("API key Google AI Studio mancante: inseriscila nelle impostazioni per attivare il coach.")
         else:
             self.alert_label.setText("")
         if not metrics:
             self._set_card(self.card_session, "-", "Nessuna sessione registrata")
-            self._set_card(self.card_laps, "-", "Giri")
+            self._set_card(self.card_laps, "-", "Ultima sessione")
             self._set_card(self.card_best_lap, "-", "Tempo")
             self.consistency_bar.setValue(0)
             self.efficiency_bar.setValue(0)
+            self.session_state_preview.setText("Sessione inattiva")
+            self.session_state_preview.setStyleSheet(self._pill_style("rgba(255,255,255,0.08)", TEXT_MUTED))
             return
         session_title = f"{metrics.get('track_name', 'Sconosciuto')} - {metrics.get('car_model', '')}"
-        self._set_card(self.card_session, session_title, metrics.get("started_at", ""))
-        self._set_card(self.card_laps, str(metrics.get("laps", 0)), "Giri completati")
-        self._set_card(self.card_best_lap, format_lap_time(metrics.get("best_lap")), "Miglior tempo")
+        started = metrics.get("started_at", "")
+        self._set_card(self.card_session, session_title, started or "Nessuna data")
+        laps_value = str(metrics.get("laps", 0))
+        self._set_card(self.card_laps, laps_value, "Ultima sessione")
+        best_lap = format_lap_time(metrics.get("best_lap"))
+        self._set_card(self.card_best_lap, best_lap, "Tempo")
         self.consistency_bar.setValue(int(float(metrics.get("consistency", 0.0)) * 100))
         self.efficiency_bar.setValue(int(float(metrics.get("efficiency", 0.0)) * 100))
+        self.session_state_preview.setText("Ultima sessione aggiornata")
+        self.session_state_preview.setStyleSheet(self._pill_style("rgba(33,186,117,0.18)", SUCCESS_GREEN))
+        self.session_log_preview.setText("Monitorando i feedback più recenti...")
+
+    def set_api_ready(self, ready: bool) -> None:
+        if ready:
+            self.banner_subtitle.hide()
+            self.banner_title.setStyleSheet("font-size: 30px; font-weight: 700; letter-spacing: 0.02em;")
+            self.session_state_preview.setText("Sessione inattiva")
+            self.session_state_preview.setStyleSheet(self._pill_style("rgba(255,255,255,0.08)", TEXT_MUTED))
+        else:
+            self.banner_subtitle.show()
+            self.banner_title.setStyleSheet("font-size: 30px; font-weight: 700; letter-spacing: 0.02em;")
+            self.session_state_preview.setText("API mancanti")
+            self.session_state_preview.setStyleSheet(self._pill_style("rgba(156,42,35,0.25)", ACCENT_GLOW))
 
     @staticmethod
-    def _set_card(card: QFrame, value: str, subtitle: str) -> None:
+    def _set_card(card: QFrame, value: str, subtitle: str, trend: Optional[str] = None) -> None:
         value_label = card.findChild(QLabel, "cardValue")
         if value_label:
             value_label.setText(value)
-        labels = card.findChildren(QLabel)
-        if len(labels) >= 3:
-            labels[2].setText(subtitle)
+        trend_label = card.findChild(QLabel, "cardTrend")
+        if trend_label:
+            if trend:
+                trend_label.setText(trend)
+                trend_label.show()
+            else:
+                trend_label.hide()
+        subtitle_labels = [
+            child
+            for child in card.findChildren(QLabel)
+            if child not in (value_label, trend_label) and child.objectName() != "statusDot"
+        ]
+        if subtitle_labels:
+            subtitle_labels[-1].setText(subtitle)
+        dot_label = card.findChild(QLabel, "statusDot")
+        if dot_label:
+            color = card.property("statusColor")
+            if color:
+                dot_label.setStyleSheet(f"color: {color}; font-size: 16px;")
+            else:
+                dot_label.hide()
 
+    def _build_session_preview(self) -> QFrame:
+        section = QFrame()
+        section.setObjectName("sectionCard")
+        layout = QVBoxLayout(section)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(18)
+        title = QLabel("Sessione in tempo reale")
+        title.setStyleSheet("font-size: 20px; font-weight: 600;")
+        layout.addWidget(title)
+        self.session_state_preview = QLabel("Sessione inattiva")
+        self.session_state_preview.setStyleSheet(self._pill_style("rgba(255,255,255,0.08)", TEXT_MUTED))
+        self.session_state_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.session_state_preview, alignment=Qt.AlignmentFlag.AlignLeft)
 
+        buttons_row = QHBoxLayout()
+        buttons_row.setSpacing(12)
+        buttons_row.addWidget(self._preview_button("Live da ACC", ACCENT_RED))
+        buttons_row.addWidget(self._preview_button("Carica JSONL", SURFACE_BORDER))
+        buttons_row.addWidget(self._preview_button("Avvia", SUCCESS_GREEN))
+        buttons_row.addWidget(self._preview_button("Termina", SURFACE_BORDER, TEXT_PRIMARY))
+        buttons_row.addStretch(1)
+        layout.addLayout(buttons_row)
+
+        log_frame = QFrame()
+        log_frame.setObjectName("sectionInner")
+        log_layout = QVBoxLayout(log_frame)
+        log_layout.setContentsMargins(18, 16, 18, 16)
+        log_label = QLabel("I feedback del coach appariranno qui…")
+        log_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 14px;")
+        self.session_log_preview = log_label
+        log_layout.addWidget(log_label)
+        layout.addWidget(log_frame, stretch=1)
+        return section
+
+    def _build_analysis_preview(self) -> QFrame:
+        section = QFrame()
+        section.setObjectName("sectionCard")
+        layout = QVBoxLayout(section)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(18)
+        title = QLabel("Lap Analysis — Delta per settore")
+        title.setStyleSheet("font-size: 20px; font-weight: 600;")
+        layout.addWidget(title)
+
+        chart_frame = QFrame()
+        chart_frame.setObjectName("sectionInner")
+        chart_layout = QVBoxLayout(chart_frame)
+        chart_layout.setContentsMargins(18, 18, 18, 18)
+        chart_layout.setSpacing(12)
+        bar_layout = QHBoxLayout()
+        bar_layout.setSpacing(12)
+        for height in (40, 68, 100, 55, 80, 45, 90):
+            bar = QFrame()
+            bar.setMinimumWidth(16)
+            bar.setMaximumWidth(20)
+            bar.setFixedHeight(height)
+            bar.setStyleSheet(
+                f"background-color: {ACCENT_RED}; border-radius: 6px; min-height: 40px;"
+            )
+            bar_layout.addWidget(bar, alignment=Qt.AlignmentFlag.AlignBottom)
+        bar_layout.addStretch(1)
+        chart_layout.addLayout(bar_layout)
+        footer = QLabel("Trend stimato sui settori principali (mockup)")
+        footer.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px;")
+        chart_layout.addWidget(footer, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(chart_frame, stretch=1)
+        return section
+
+    def _build_progress_card(self, title: str, chunk_color: str) -> tuple[QFrame, QProgressBar]:
+        wrapper = QFrame()
+        wrapper.setObjectName("sectionCard")
+        wrapper_layout = QVBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(24, 18, 24, 18)
+        wrapper_layout.setSpacing(12)
+        label = QLabel(title)
+        label.setStyleSheet("font-size: 16px; font-weight: 600;")
+        wrapper_layout.addWidget(label)
+        bar = QProgressBar()
+        bar.setRange(0, 100)
+        bar.setFormat("%p%")
+        bar.setTextVisible(False)
+        bar.setStyleSheet(
+            "QProgressBar {background-color: rgba(255,255,255,0.07); border: 0px; height: 16px; border-radius: 10px;}"
+            f"QProgressBar::chunk {{background: {chunk_color}; border-radius: 10px;}}"
+        )
+        wrapper_layout.addWidget(bar)
+        return wrapper, bar
+
+    @staticmethod
+    def _pill_style(bg: str, fg: str) -> str:
+        return f"background-color: {bg}; color: {fg}; padding: 6px 12px; border-radius: 12px; font-weight: 600;"
+
+    def _preview_button(self, text: str, background: str, foreground: str = TEXT_PRIMARY) -> QLabel:
+        label = QLabel(text)
+        label.setStyleSheet(
+            f"background-color: {background}; color: {foreground}; padding: 6px 16px; border-radius: 10px; font-weight: 600;"
+        )
+        return label
 class DownloadPage(QWidget):
     download_requested = Signal(str, str)
 
@@ -749,7 +949,7 @@ class ConfigPage(QWidget):
     def __init__(self, env_manager: EnvManager, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.env_manager = env_manager
-        self.inputs: Dict[str, QLineEdit | QComboBox] = {}
+        self.api_inputs: Dict[str, QLineEdit] = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -761,27 +961,54 @@ class ConfigPage(QWidget):
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(28, 28, 28, 28)
 
-        title = QLabel("Impostazioni e API key")
+        title = QLabel("Impostazioni e integrazioni")
         title.setStyleSheet("font-size: 24px; font-weight: 700; letter-spacing: 0.05em;")
         card_layout.addWidget(title)
 
         form = QFormLayout()
         for key, label in ENV_FIELDS:
-            if key == "ENABLE_TTS":
-                combo = QComboBox()
-                combo.addItems(["0", "1"])
-                self.inputs[key] = combo
-                form.addRow(label + ":", combo)
-            elif key == "TTS_PROVIDER":
-                combo = QComboBox()
-                combo.addItems(["gtts", "elevenlabs"])
-                self.inputs[key] = combo
-                form.addRow(label + ":", combo)
-            else:
-                edit = QLineEdit()
-                self.inputs[key] = edit
-                form.addRow(label + ":", edit)
+            edit = QLineEdit()
+            edit.setEchoMode(QLineEdit.EchoMode.Password if "KEY" in key else QLineEdit.EchoMode.Normal)
+            self.api_inputs[key] = edit
+            form.addRow(label + ":", edit)
         card_layout.addLayout(form)
+
+        self.acc_checkbox = QCheckBox("Connettiti ad Assetto Corsa Competizione in tempo reale (UDP)")
+        card_layout.addWidget(self.acc_checkbox)
+
+        status_row = QHBoxLayout()
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.setSpacing(12)
+        self.acc_status_pill = QLabel("Inattiva")
+        self.acc_status_pill.setObjectName("statusPill")
+        self.acc_status_pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        status_row.addWidget(self.acc_status_pill, alignment=Qt.AlignmentFlag.AlignLeft)
+        self.acc_test_btn = QPushButton("Test connessione")
+        self.acc_test_btn.clicked.connect(self._test_connection)
+        status_row.addWidget(self.acc_test_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        status_row.addStretch(1)
+        card_layout.addLayout(status_row)
+
+        acc_grid = QGridLayout()
+        acc_grid.setHorizontalSpacing(16)
+        host_label = QLabel("Host UDP")
+        host_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 13px;")
+        self.acc_host_input = QLineEdit()
+        port_label = QLabel("Porta UDP")
+        port_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 13px;")
+        self.acc_port_input = QLineEdit()
+        self.acc_port_input.setValidator(QIntValidator(1, 65535, self))
+        acc_grid.addWidget(host_label, 0, 0)
+        acc_grid.addWidget(self.acc_host_input, 1, 0)
+        acc_grid.addWidget(port_label, 0, 1)
+        acc_grid.addWidget(self.acc_port_input, 1, 1)
+        card_layout.addLayout(acc_grid)
+
+        self.acc_hint_base = "Apri Assetto Corsa Competizione > Opzioni > Telemetria e abilita UDP con l'host indicato sopra."
+        self.acc_hint = QLabel(self.acc_hint_base)
+        self.acc_hint.setWordWrap(True)
+        self.acc_hint.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 13px;")
+        card_layout.addWidget(self.acc_hint)
 
         save_btn = QPushButton("Salva configurazione")
         save_btn.setObjectName("accentButton")
@@ -793,24 +1020,88 @@ class ConfigPage(QWidget):
         self.refresh()
 
     def refresh(self) -> None:
-        for key, widget in self.inputs.items():
-            value = self.env_manager.values.get(key, DEFAULT_VALUES.get(key, ""))
-            if isinstance(widget, QComboBox):
-                idx = widget.findText(value)
-                widget.setCurrentIndex(idx if idx >= 0 else 0)
-            else:
-                widget.setText(value)
+        for key, edit in self.api_inputs.items():
+            edit.setText(self.env_manager.values.get(key, DEFAULT_VALUES.get(key, "")))
+        self.acc_checkbox.setChecked(self.env_manager.values.get("ACC_USE_LIVE", "1") == "1")
+        self.acc_host_input.setText(self.env_manager.values.get("ACC_UDP_HOST", DEFAULT_VALUES["ACC_UDP_HOST"]))
+        self.acc_port_input.setText(self.env_manager.values.get("ACC_UDP_PORT", DEFAULT_VALUES["ACC_UDP_PORT"]))
+        self._update_acc_controls()
+        self._update_connection_status("inactive", "In attesa di test connessione.")
 
     def _save(self) -> None:
         updates: Dict[str, str] = {}
-        for key, widget in self.inputs.items():
-            if isinstance(widget, QComboBox):
-                updates[key] = widget.currentText()
-            else:
-                updates[key] = widget.text().strip()
+        for key, edit in self.api_inputs.items():
+            updates[key] = edit.text().strip()
+        if self.acc_checkbox.isChecked():
+            port_val = self.acc_port_input.text().strip()
+            if not port_val.isdigit():
+                QMessageBox.warning(self, "Porta non valida", "Inserisci una porta UDP numerica valida.")
+                return
+        else:
+            port_val = self.acc_port_input.text().strip() or DEFAULT_VALUES["ACC_UDP_PORT"]
+        updates["ACC_USE_LIVE"] = "1" if self.acc_checkbox.isChecked() else "0"
+        updates["ACC_UDP_HOST"] = self.acc_host_input.text().strip() or DEFAULT_VALUES["ACC_UDP_HOST"]
+        updates["ACC_UDP_PORT"] = port_val
         self.env_manager.update(updates)
         self.values_saved.emit(updates)
         QMessageBox.information(self, "Salvato", "Impostazioni aggiornate correttamente.")
+        self._update_acc_controls()
+        self._update_connection_status("inactive" if self.acc_checkbox.isChecked() else "disabled", "Configurazione salvata.")
+
+    def _update_acc_controls(self) -> None:
+        enabled = self.acc_checkbox.isChecked()
+        self.acc_host_input.setEnabled(enabled)
+        self.acc_port_input.setEnabled(enabled)
+        if enabled:
+            self.acc_hint.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 13px;")
+            self.acc_test_btn.setEnabled(True)
+        else:
+            self.acc_hint.setStyleSheet(f"color: {ACCENT_GLOW}; font-size: 13px;")
+            self.acc_test_btn.setEnabled(False)
+            self._update_connection_status("disabled", "Connessione disattivata.")
+
+    def _update_connection_status(self, state: str, message: str) -> None:
+        colors = {
+            "inactive": ("Inattiva", "rgba(255,255,255,0.08)", TEXT_MUTED),
+            "pending": ("In attesa", "rgba(240,180,41,0.18)", WARNING_AMBER),
+            "active": ("Live", "rgba(33,186,117,0.2)", SUCCESS_GREEN),
+            "error": ("Errore", "rgba(156,42,35,0.25)", ACCENT_GLOW),
+            "disabled": ("Disattiva", "rgba(255,255,255,0.05)", TEXT_MUTED),
+        }
+        label, bg, fg = colors.get(state, colors["inactive"])
+        self.acc_status_pill.setText(label)
+        self.acc_status_pill.setStyleSheet(
+            f"background-color: {bg}; color: {fg}; padding: 6px 12px; border-radius: 12px; font-weight: 600;"
+        )
+        hint_text = self.acc_hint_base
+        if message:
+            hint_text = f"{self.acc_hint_base}\n{message}"
+        self.acc_hint.setText(hint_text)
+
+    def _test_connection(self) -> None:
+        if not self.acc_checkbox.isChecked():
+            self._update_connection_status("disabled", "Abilita prima la connessione live.")
+            return
+        host = self.acc_host_input.text().strip() or DEFAULT_VALUES["ACC_UDP_HOST"]
+        port_text = self.acc_port_input.text().strip() or DEFAULT_VALUES["ACC_UDP_PORT"]
+        if not port_text.isdigit():
+            self._update_connection_status("error", "Porta non valida.")
+            return
+        port = int(port_text)
+        self._update_connection_status("pending", "Test connessione in corso...")
+        QApplication.processEvents()
+        try:
+            info = socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_DGRAM)
+            family, socktype, proto, _canon, sockaddr = info[0]
+            sock = socket.socket(family, socktype, proto)
+            sock.settimeout(1.0)
+            start = time.perf_counter()
+            sock.sendto(b"ping", sockaddr)
+            elapsed = (time.perf_counter() - start) * 1000
+            sock.close()
+            self._update_connection_status("active", f"UDP pronto (≈{elapsed:.0f} ms)")
+        except Exception as exc:  # pragma: no cover - fallback
+            self._update_connection_status("error", f"Errore connessione: {exc}")
 
 
 class CoachPage(QWidget):
@@ -818,6 +1109,10 @@ class CoachPage(QWidget):
         super().__init__(parent)
         self.env_manager = env_manager
         self.controller = controller
+        self._updating_tts = False
+        self.session_active = False
+        self.controls_enabled = True
+        self._log_entries: list[tuple[str, str, str]] = []
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -829,69 +1124,160 @@ class CoachPage(QWidget):
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(28, 28, 28, 28)
 
-        title = QLabel("Coach AI - Telemetria locale")
+        title_row = QHBoxLayout()
+        title = QLabel("Sessione in tempo reale")
         title.setStyleSheet("font-size: 24px; font-weight: 700; letter-spacing: 0.05em;")
-        card_layout.addWidget(title)
+        title_row.addWidget(title)
+        title_row.addStretch(1)
+        self.tts_toggle = QCheckBox("Feedback vocale (ElevenLabs)")
+        self.tts_toggle.setAccessibleName("Attiva feedback vocale ElevenLabs")
+        self.tts_toggle.stateChanged.connect(self._on_tts_toggle)
+        title_row.addWidget(self.tts_toggle)
+        card_layout.addLayout(title_row)
 
-        self.info_label = QLabel("")
+        self.info_label = QLabel("Configura le API e scegli la sorgente dati per iniziare.")
         self.info_label.setStyleSheet(f"color: {ACCENT_GLOW}; font-size: 14px;")
         card_layout.addWidget(self.info_label)
-        self._updating_tts = False
-        self.tts_toggle = QCheckBox("Abilita feedback vocale (ElevenLabs)")
-        self.tts_toggle.setChecked(self.env_manager.values.get("ENABLE_TTS", "0") == "1")
-        self.tts_toggle.stateChanged.connect(self._on_tts_toggle)
-        card_layout.addWidget(self.tts_toggle)
 
-        row = QHBoxLayout()
+        self.session_indicator = QLabel("Sessione inattiva")
+        self.session_indicator.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.session_indicator.setStyleSheet(self._indicator_style("rgba(255,255,255,0.05)", TEXT_MUTED))
+        self.session_indicator.setAccessibleName("Stato della sessione coach")
+        card_layout.addWidget(self.session_indicator)
+
+        source_row = QHBoxLayout()
+        source_row.setSpacing(12)
+        source_column = QVBoxLayout()
+        source_column.setSpacing(6)
+        self.source_group = QButtonGroup(self)
+        self.live_radio = QRadioButton("Live da Assetto Corsa Competizione")
+        self.live_radio.setProperty("mode", "live")
+        self.live_radio.setAccessibleName("Sorgente live da ACC")
+        self.file_radio = QRadioButton("File JSONL locale")
+        self.file_radio.setProperty("mode", "simulation")
+        self.file_radio.setAccessibleName("Sorgente da file JSONL")
+        self.source_group.addButton(self.live_radio)
+        self.source_group.addButton(self.file_radio)
+        source_column.addWidget(self.live_radio)
+        source_column.addWidget(self.file_radio)
+        source_row.addLayout(source_column, stretch=0)
         self.simulation_input = QLineEdit(self)
-        browse_btn = QPushButton("Sfoglia simulazione")
-        browse_btn.clicked.connect(self._select_simulation)
-        row.addWidget(self.simulation_input)
-        row.addWidget(browse_btn)
-        card_layout.addLayout(row)
+        self.simulation_input.setPlaceholderText("Percorso file JSONL per simulazione")
+        self.simulation_input.setEnabled(False)
+        self._browse_btn = QPushButton("Sfoglia file")
+        self._browse_btn.clicked.connect(self._select_simulation)
+        self._browse_btn.setEnabled(False)
+        input_column = QHBoxLayout()
+        input_column.setContentsMargins(0, 0, 0, 0)
+        input_column.setSpacing(12)
+        input_column.addWidget(self.simulation_input)
+        input_column.addWidget(self._browse_btn)
+        source_row.addLayout(input_column, stretch=1)
+        card_layout.addLayout(source_row)
+        self.source_group.buttonToggled.connect(self._on_source_changed)
 
         buttons = QHBoxLayout()
-        self.start_btn = QPushButton("Avvia servizi")
-        self.start_btn.setObjectName("accentButton")
-        self.start_btn.clicked.connect(self._start_services)
-        self.stop_btn = QPushButton("Ferma servizi")
-        self.stop_btn.clicked.connect(self._stop_services)
+        buttons.setSpacing(12)
+        self.start_btn = QPushButton("Avvia sessione")
+        self.start_btn.clicked.connect(self._start_session)
+        self.stop_btn = QPushButton("Termina sessione")
+        self.stop_btn.clicked.connect(self._stop_session)
+        self.export_btn = QPushButton("Esporta suggerimenti")
+        self.export_btn.clicked.connect(self._export_feedback)
         buttons.addWidget(self.start_btn)
         buttons.addWidget(self.stop_btn)
+        buttons.addStretch(1)
+        buttons.addWidget(self.export_btn)
         card_layout.addLayout(buttons)
 
-        self.status_label = QLabel("Servizi non avviati.")
-        self.status_label.setStyleSheet(f"color: {ACCENT_GLOW}; font-size: 14px;")
+        self._start_btn_base_style = self._neutral_button_style()
+        self._stop_btn_base_style = self._neutral_button_style()
+        self.start_btn.setStyleSheet(self._start_btn_base_style)
+        self.stop_btn.setStyleSheet(self._stop_btn_base_style)
+
+        self.status_label = QLabel("Sessione non attiva.")
+        self.status_label.setAccessibleName("Descrizione stato sessione")
+        self._set_session_state(False)
         card_layout.addWidget(self.status_label)
+
+        filter_row = QHBoxLayout()
+        filter_row.setContentsMargins(0, 0, 0, 0)
+        filter_row.setSpacing(12)
+        filter_label = QLabel("Filtro log")
+        filter_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 13px;")
+        filter_row.addWidget(filter_label)
+        self.log_filter = QComboBox()
+        self.log_filter.addItems(["Tutti", "Info", "Warning", "Errore"])
+        self.log_filter.setAccessibleName("Filtro severità log coach")
+        filter_row.addWidget(self.log_filter, stretch=0)
+        filter_row.addStretch(1)
+        card_layout.addLayout(filter_row)
+        self.log_filter.currentTextChanged.connect(self._refresh_log)
 
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setPlaceholderText("I feedback del coach appariranno qui.")
+        self.log_view.setAccessibleName("Log feedback coach AI")
+        self.log_view.setAccessibleDescription("Aggiornamenti in tempo reale dal coach AI.")
+        self.log_view.setProperty("aria-live", "polite")
         card_layout.addWidget(self.log_view, stretch=1)
 
         layout.addWidget(card)
         layout.addStretch(1)
 
-        default_sim = env_manager.get_install_dir() / "data" / "simulations" / "sample_lap.jsonl"
-        self.simulation_input.setText(str(default_sim))
         controller.feedback_received.connect(self._on_feedback)
         controller.status_changed.connect(self._on_status)
 
     def refresh(self) -> None:
-        default_sim = self.env_manager.get_install_dir() / "data" / "simulations" / "sample_lap.jsonl"
-        if not self.simulation_input.text().strip():
-            self.simulation_input.setText(str(default_sim))
+        use_live = self.env_manager.values.get("ACC_USE_LIVE", "1") == "1"
+        self.source_group.blockSignals(True)
+        self.live_radio.setChecked(use_live)
+        self.file_radio.setChecked(not use_live)
+        self.source_group.blockSignals(False)
+        self._apply_source_mode("live" if use_live else "simulation")
         self._updating_tts = True
         self.tts_toggle.setChecked(self.env_manager.values.get("ENABLE_TTS", "0") == "1")
         self._updating_tts = False
+        self._set_session_state(False)
+        self.set_enabled(self.controls_enabled)
 
     def set_enabled(self, enabled: bool) -> None:
-        self.start_btn.setEnabled(enabled)
+        self.controls_enabled = enabled
+        if not enabled:
+            self._set_session_state(False)
         self.tts_toggle.setEnabled(enabled)
+        self.live_radio.setEnabled(enabled)
+        self.file_radio.setEnabled(enabled)
+        self.simulation_input.setEnabled(enabled and self.file_radio.isChecked())
+        self._browse_btn.setEnabled(enabled and self.file_radio.isChecked())
+        self.start_btn.setEnabled(enabled and not self.session_active)
+        self.stop_btn.setEnabled(enabled and self.session_active)
         if not enabled:
             self.info_label.setText("Inserisci la Google AI Studio API key nella sezione Impostazioni per attivare il coach.")
         else:
-            self.info_label.setText("Seleziona un file di simulazione o collega ACC e avvia i servizi.")
+            self._apply_source_mode(self._current_mode())
+
+    def _current_mode(self) -> str:
+        return "simulation" if self.file_radio.isChecked() else "live"
+
+    def _on_source_changed(self, button: QAbstractButton, checked: bool) -> None:
+        if not checked:
+            return
+        mode = button.property("mode") or "live"
+        self._apply_source_mode(mode)
+
+    def _apply_source_mode(self, mode: str) -> None:
+        is_sim = mode == "simulation"
+        self.simulation_input.setEnabled(is_sim and self.controls_enabled)
+        self._browse_btn.setEnabled(is_sim and self.controls_enabled)
+        if not self.controls_enabled:
+            return
+        if is_sim:
+            self.info_label.setText("Seleziona un file JSONL di telemetria per la simulazione.")
+        else:
+            self.info_label.setText("Assicurati che ACC abbia la telemetria UDP attiva e avvia la sessione.")
+        self.start_btn.setEnabled(not self.session_active)
+        self.stop_btn.setEnabled(self.session_active)
 
     def _on_tts_toggle(self, state: int) -> None:
         if self._updating_tts:
@@ -909,7 +1295,7 @@ class CoachPage(QWidget):
         if file_path:
             self.simulation_input.setText(file_path)
 
-    def _start_services(self) -> None:
+    def _start_session(self) -> None:
         if not self.env_manager.has_required_api_keys():
             QMessageBox.warning(
                 self,
@@ -917,22 +1303,129 @@ class CoachPage(QWidget):
                 "Inserisci la Google AI Studio API key obbligatoria prima di avviare il coach.",
             )
             return
-        path = Path(self.simulation_input.text().strip())
-        self.controller.start(path)
+        if self.session_active or self.controller.is_running:
+            self._set_session_state(True)
+            self.status_label.setText("Sessione già attiva")
+            self.status_label.setStyleSheet(f"color: {SUCCESS_GREEN}; font-size: 14px;")
+            return
+        mode = self._current_mode()
+        if mode == "simulation":
+            path = Path(self.simulation_input.text().strip())
+            if not path.exists():
+                QMessageBox.warning(self, "File mancante", "Seleziona un file JSONL valido per la simulazione.")
+                return
+            config = CollectorConfig(
+                mode=CollectorMode.SIMULATION,
+                simulation_file=str(path),
+                loop_simulation=True,
+                playback_rate=1.0,
+            )
+        else:
+            host = self.env_manager.values.get("ACC_UDP_HOST", DEFAULT_VALUES["ACC_UDP_HOST"])
+            port_value = self.env_manager.values.get("ACC_UDP_PORT", DEFAULT_VALUES["ACC_UDP_PORT"])
+            try:
+                port = int(port_value)
+            except ValueError:
+                QMessageBox.warning(self, "Porta non valida", "Imposta una porta numerica valida per ACC.")
+                return
+            config = CollectorConfig(mode=CollectorMode.UDP, udp_host=host, udp_port=port)
+        self.env_manager.update({"ACC_USE_LIVE": "0" if mode == "simulation" else "1"})
+        self._set_session_pending("Avvio sessione...", activating=True)
+        QTimer.singleShot(0, lambda cfg=config: self.controller.start(cfg))
 
-    def _stop_services(self) -> None:
-        self.controller.stop()
+    def _stop_session(self) -> None:
+        if not self.session_active and not self.controller.is_running:
+            self._set_session_state(False)
+            return
+        self._set_session_pending("Terminazione sessione...", activating=False)
+        QTimer.singleShot(0, self.controller.stop)
+
+    def _export_feedback(self) -> None:
+        install_dir = self.env_manager.get_install_dir()
+        reports_dir = install_dir / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        file_path = reports_dir / "coach_feedback.txt"
+        file_path.write_text(self.log_view.toPlainText(), encoding="utf-8")
+        QMessageBox.information(self, "Esportato", f"Log salvato in {file_path}")
 
     def _on_feedback(self, event: dict) -> None:
         message = event.get("message", "")
         section = event.get("section", "Generale")
-        severity = event.get("severity", "info")
-        self.log_view.append(f"[{severity.upper()}] {section}: {message}")
+        severity = event.get("severity", "info").lower()
+        entry = (datetime.now().strftime("%H:%M:%S"), severity, f"{section}: {message}")
+        self._log_entries.append(entry)
+        self._refresh_log()
+
+    def _refresh_log(self) -> None:
+        level = self.log_filter.currentText().lower()
+        self.log_view.clear()
+        for timestamp, severity, message in self._log_entries:
+            if level != "tutti" and severity != level:
+                continue
+            self.log_view.append(f"[{timestamp}] [{severity.upper()}] {message}")
+        sb = self.log_view.verticalScrollBar()
+        if sb:
+            sb.setValue(sb.maximum())
 
     def _on_status(self, status: str) -> None:
-        self.status_label.setText(status)
+        lower = status.lower()
+        if "avviat" in lower or "attiva" in lower:
+            self._set_session_state(True)
+        elif "terminata" in lower or "ferm" in lower or "non attiva" in lower or "errore" in lower:
+            self._set_session_state(False)
+        else:
+            self.status_label.setText(status)
+            self.status_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 14px;")
 
+    def _set_session_pending(self, text: str, activating: bool) -> None:
+        self.session_indicator.setText(text)
+        self.session_indicator.setStyleSheet(self._indicator_style("rgba(240,180,41,0.25)", TEXT_PRIMARY))
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(False)
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet(f"color: {WARNING_AMBER}; font-size: 14px;")
+        if activating:
+            self.start_btn.setStyleSheet(self._accent_button_style())
+        else:
+            self.start_btn.setStyleSheet(self._start_btn_base_style)
+        self.stop_btn.setStyleSheet(self._stop_btn_base_style)
 
+    def _set_session_state(self, active: bool) -> None:
+        self.session_active = active
+        if active:
+            self.session_indicator.setText("Sessione attiva")
+            self.session_indicator.setStyleSheet(self._indicator_style("rgba(33,186,117,0.2)", TEXT_PRIMARY))
+            self.start_btn.setStyleSheet(self._accent_button_style())
+            self.stop_btn.setStyleSheet(self._stop_btn_base_style)
+            self.status_label.setText("Sessione attiva")
+            self.status_label.setStyleSheet(f"color: {SUCCESS_GREEN}; font-size: 14px;")
+        else:
+            self.session_indicator.setText("Sessione inattiva")
+            self.session_indicator.setStyleSheet(self._indicator_style("rgba(255,255,255,0.05)", TEXT_MUTED))
+            self.start_btn.setStyleSheet(self._start_btn_base_style)
+            self.stop_btn.setStyleSheet(self._stop_btn_base_style)
+            self.status_label.setText("Sessione non attiva.")
+            self.status_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 14px;")
+        self.start_btn.setEnabled(self.controls_enabled and not active)
+        self.stop_btn.setEnabled(self.controls_enabled and active)
+
+    def _indicator_style(self, bg: str, fg: str) -> str:
+        return (
+            f"background-color: {bg}; color: {fg}; padding: 6px 12px; border-radius: 12px;"
+            " font-size: 13px; letter-spacing: 0.04em;"
+        )
+
+    def _neutral_button_style(self) -> str:
+        return (
+            f"background-color: {SECONDARY_BG}; color: {TEXT_PRIMARY}; border: 1px solid transparent;"
+            " padding: 10px 16px; border-radius: 12px; font-size: 15px;"
+        )
+
+    def _accent_button_style(self) -> str:
+        return (
+            f"background-color: {ACCENT_RED}; color: {TEXT_PRIMARY}; border: none;"
+            " padding: 10px 16px; border-radius: 12px; font-size: 15px;"
+        )
 class LapAnalysisPage(QWidget):
     def __init__(self, env_manager: EnvManager, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -947,14 +1440,22 @@ class LapAnalysisPage(QWidget):
         layout.setSpacing(18)
 
         filter_card = QFrame()
-        filter_card.setObjectName("card")
+        filter_card.setObjectName("sectionCard")
         filter_card.setFrameShape(QFrame.Shape.NoFrame)
         filter_layout = QVBoxLayout(filter_card)
         filter_layout.setContentsMargins(28, 28, 28, 28)
 
+        header_row = QHBoxLayout()
+        header_row.setSpacing(12)
         title = QLabel("Lap Analysis")
         title.setStyleSheet("font-size: 24px; font-weight: 700; letter-spacing: 0.05em;")
-        filter_layout.addWidget(title)
+        header_row.addWidget(title)
+        header_row.addStretch(1)
+        refresh_btn = QPushButton("Aggiorna dati")
+        refresh_btn.setObjectName("accentButton")
+        refresh_btn.clicked.connect(self.refresh)
+        header_row.addWidget(refresh_btn)
+        filter_layout.addLayout(header_row)
 
         filter_row = QHBoxLayout()
         filter_row.setSpacing(16)
@@ -1027,7 +1528,7 @@ class LapAnalysisPage(QWidget):
         layout.addWidget(filter_card)
 
         table_card = QFrame()
-        table_card.setObjectName("card")
+        table_card.setObjectName("sectionCard")
         table_card.setFrameShape(QFrame.Shape.NoFrame)
         table_layout = QVBoxLayout(table_card)
         table_layout.setContentsMargins(28, 28, 28, 28)
@@ -1036,13 +1537,19 @@ class LapAnalysisPage(QWidget):
         table_title.setStyleSheet("font-size: 20px; font-weight: 600;")
         table_layout.addWidget(table_title)
 
-        self.delta_table = QTableWidget(0, 3)
-        self.delta_table.setHorizontalHeaderLabels(["Curva", "Settore", "Delta (ms)"])
+        self.delta_table = QTableWidget(0, 4)
+        self.delta_table.setHorizontalHeaderLabels(["Curva", "Settore", "Delta (ms)", "Consiglio"])
         self.delta_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.delta_table.verticalHeader().setVisible(False)
         self.delta_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.delta_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         table_layout.addWidget(self.delta_table)
+        self.empty_state = QLabel("Seleziona pista e vettura, poi avvia una sessione per popolare i dati.")
+        self.empty_state.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 14px;")
+        self.empty_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        table_layout.addWidget(self.empty_state)
+        self.empty_state.hide()
+        self.delta_table.hide()
 
         layout.addWidget(table_card)
         layout.addStretch(1)
@@ -1106,7 +1613,11 @@ class LapAnalysisPage(QWidget):
             self._clear_table()
             self._set_message("Nessun giro registrato per la combinazione selezionata.")
             self.ideal_label.setText("Giro ideale non disponibile")
+            self.delta_table.hide()
+            self.empty_state.show()
             return
+        self.empty_state.hide()
+        self.delta_table.show()
         laps = sorted(analysis["laps"], key=lambda lap: lap.get("lap_number") or 0)
         for lap in laps:
             item_text = f"Lap {lap.get('lap_number', '?')} - {format_lap_time(lap.get('lap_time_ms'))}"
@@ -1213,6 +1724,8 @@ class LapAnalysisPage(QWidget):
             label.setText("-")
         self.lap_list.clear()
         self.ideal_label.setText("Giro ideale non disponibile")
+        self.delta_table.hide()
+        self.empty_state.show()
 
     def _clear_table(self) -> None:
         self.delta_table.setRowCount(0)
@@ -1245,8 +1758,17 @@ class MainWindow(QMainWindow):
                 "settings": "Impostazioni",
             }
         )
+        self.sidebar.setObjectName("Sidebar")
+        self.sidebar.setMinimumWidth(240)
         self.sidebar.selection_changed.connect(self._on_menu_selected)
         root_layout.addWidget(self.sidebar)
+
+        self.divider = QFrame()
+        self.divider.setObjectName("sidebarDivider")
+        self.divider.setFrameShape(QFrame.Shape.NoFrame)
+        self.divider.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.divider.setFixedWidth(2)
+        root_layout.addWidget(self.divider)
 
         self.main_panel = QWidget()
         main_layout = QVBoxLayout(self.main_panel)
@@ -1268,6 +1790,7 @@ class MainWindow(QMainWindow):
         self.lap_analysis_page = LapAnalysisPage(self.env_manager)
         self.download_page = DownloadPage(self.env_manager)
         self.config_page = ConfigPage(self.env_manager)
+        self._animations: list[QPropertyAnimation] = []
 
         self.stack.addWidget(self.home_page)
         self.stack.addWidget(self.coach_page)
@@ -1296,17 +1819,39 @@ class MainWindow(QMainWindow):
             color: {TEXT_PRIMARY};
             font-family: 'Segoe UI', 'Inter', sans-serif;
             font-size: 15px;
+            line-height: 1.48;
         }}
         QFrame#card {{
             background-color: {CARD_BG};
+            background: qlineargradient(0, 0, 0, 1, stop: 0 rgba(156,42,35,0.12), stop: 1 rgba(24,26,30,1));
             border-radius: 20px;
-            border: none;
+            border: 1px solid {SURFACE_BORDER};
             box-shadow: none;
+        }}
+        QFrame#card:hover {{
+            background: qlineargradient(0, 0, 0, 1, stop: 0 rgba(210,59,59,0.16), stop: 1 rgba(30,33,39,1));
+        }}
+        QFrame#sectionCard {{
+            background-color: {SURFACE_MEDIUM};
+            border-radius: 26px;
+            border: 1px solid {SURFACE_BORDER};
+            padding: 28px;
+        }}
+        QFrame#sectionInner {{
+            background-color: {CARD_BG};
+            border-radius: 18px;
+            border: 1px solid rgba(255,255,255,0.04);
         }}
         QFrame#card QLabel {{
             background-color: transparent;
             border: none;
             text-shadow: none;
+        }}
+        QLabel#statusPill {{
+            padding: 6px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
         }}
         QLabel#cardValue {{
             color: {TEXT_PRIMARY};
@@ -1315,12 +1860,24 @@ class MainWindow(QMainWindow):
             text-shadow: none;
             padding-left: 12px;
         }}
+        QLabel#cardUnit {{
+            color: {TEXT_MUTED};
+            font-size: 14px;
+            font-weight: 500;
+        }}
+        QLabel#cardTrend {{
+            font-size: 13px;
+            font-weight: 600;
+        }}
+        QLabel#statusDot {{
+            font-size: 16px;
+        }}
         QLabel {{
             text-shadow: none;
         }}
         QPushButton {{
             background-color: {SECONDARY_BG};
-            border: 1px solid transparent;
+            border: 1px solid rgba(255,255,255,0.04);
             border-radius: 12px;
             padding: 10px 16px;
             color: {TEXT_PRIMARY};
@@ -1336,7 +1893,7 @@ class MainWindow(QMainWindow):
         }}
         QPushButton#accentButton {{
             background-color: {ACCENT_RED};
-            border: none;
+            border: 1px solid {ACCENT_RED};
             font-weight: bold;
             font-size: 16px;
         }}
@@ -1368,6 +1925,8 @@ class MainWindow(QMainWindow):
             border: 1px solid rgba(255,255,255,0.06);
             color: {TEXT_PRIMARY};
             box-shadow: none;
+            selection-background-color: {ACCENT_RED};
+            selection-color: {TEXT_PRIMARY};
         }}
         QComboBox::drop-down {{
             border: none;
@@ -1378,6 +1937,16 @@ class MainWindow(QMainWindow):
             padding: 12px;
             border: 1px solid rgba(255,255,255,0.06);
             box-shadow: none;
+        }}
+        QPushButton:focus, QLineEdit:focus, QComboBox:focus, QTextEdit:focus {{
+            border: 1px solid #D23B3B;
+            box-shadow: 0 0 0 2px rgba(210, 59, 59, 0.28);
+        }}
+        QWidget#Sidebar {{
+            background-color: #121216;
+        }}
+        QFrame#sidebarDivider {{
+            background-color: {SURFACE_BORDER};
         }}
         QScrollBar:vertical {{
             background: transparent;
@@ -1413,6 +1982,9 @@ class MainWindow(QMainWindow):
             self.config_page.refresh()
         if key in index_map:
             self.stack.setCurrentIndex(index_map[key])
+            target = self.stack.widget(index_map[key])
+            self._animate_widget(target)
+            self._animate_widget(self.header_label)
 
     def refresh_home(self) -> None:
         metrics = get_last_session_summary(self.env_manager)
@@ -1422,6 +1994,7 @@ class MainWindow(QMainWindow):
     def update_availability(self) -> None:
         api_ready = self.env_manager.has_required_api_keys()
         self.coach_page.set_enabled(api_ready)
+        self.home_page.set_api_ready(api_ready)
 
     def _apply_updates(self, updates: Dict[str, str]) -> None:
         self.env_manager.update(updates)
@@ -1457,6 +2030,26 @@ class MainWindow(QMainWindow):
         self.service_controller.stop()
         super().closeEvent(event)
 
+    def _animate_widget(self, widget: QWidget) -> None:
+        effect = widget.graphicsEffect()
+        if not isinstance(effect, QGraphicsOpacityEffect):
+            effect = QGraphicsOpacityEffect(widget)
+            widget.setGraphicsEffect(effect)
+        effect.setOpacity(0.0)
+        animation = QPropertyAnimation(effect, b"opacity", widget)
+        animation.setDuration(280)
+        animation.setStartValue(0.0)
+        animation.setEndValue(1.0)
+        animation.setEasingCurve(QEasingCurve.OutCubic)
+
+        def _cleanup() -> None:
+            if animation in self._animations:
+                self._animations.remove(animation)
+
+        animation.finished.connect(_cleanup)
+        self._animations.append(animation)
+        animation.start()
+
 
 def main() -> None:
     app = QApplication(sys.argv)
@@ -1470,11 +2063,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
