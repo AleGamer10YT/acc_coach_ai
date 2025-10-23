@@ -1,0 +1,50 @@
+
+This file lists modules PyInstaller was not able to find. This does not
+necessarily mean this module is required for running your program. Python and
+Python 3rd-party packages include a lot of conditional or optional modules. For
+example the module 'ntpath' only exists on Windows, whereas the module
+'posixpath' only exists on Posix systems.
+
+Types if import:
+* top-level: imported at the top-level - look at these first
+* conditional: imported within an if-statement
+* delayed: imported within a function
+* optional: imported within a try-except-statement
+
+IMPORTANT: Do NOT post this list to the issue-tracker. Use it as a basis for
+            tracking down the missing module yourself. Thanks!
+
+missing module named _posixshmem - imported by multiprocessing.resource_tracker (conditional), multiprocessing.shared_memory (conditional)
+missing module named 'collections.abc' - imported by logging (top-level), inspect (top-level), typing (top-level), importlib.resources.readers (top-level), selectors (top-level), tracemalloc (top-level), traceback (top-level), asyncio.base_events (top-level), http.client (top-level), asyncio.coroutines (top-level)
+missing module named multiprocessing.BufferTooShort - imported by multiprocessing (top-level), multiprocessing.connection (top-level)
+missing module named multiprocessing.AuthenticationError - imported by multiprocessing (top-level), multiprocessing.connection (top-level)
+missing module named _posixsubprocess - imported by subprocess (conditional), multiprocessing.util (delayed)
+missing module named posix - imported by os (conditional, optional), posixpath (optional), shutil (conditional), importlib._bootstrap_external (conditional)
+missing module named resource - imported by posix (top-level)
+missing module named _frozen_importlib_external - imported by importlib._bootstrap (delayed), importlib (optional), importlib.abc (optional), zipimport (top-level)
+excluded module named _frozen_importlib - imported by importlib (optional), importlib.abc (optional), zipimport (top-level)
+missing module named multiprocessing.get_context - imported by multiprocessing (top-level), multiprocessing.pool (top-level), multiprocessing.managers (top-level), multiprocessing.sharedctypes (top-level)
+missing module named multiprocessing.TimeoutError - imported by multiprocessing (top-level), multiprocessing.pool (top-level)
+missing module named multiprocessing.set_start_method - imported by multiprocessing (top-level), multiprocessing.spawn (top-level)
+missing module named multiprocessing.get_start_method - imported by multiprocessing (top-level), multiprocessing.spawn (top-level)
+missing module named pyimod02_importers - imported by C:\Users\aless\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\PyInstaller\hooks\rthooks\pyi_rth_pkgutil.py (delayed)
+missing module named redis - imported by shared.utils.message_bus (top-level)
+missing module named pydantic - imported by services.telemetry.collector (top-level), shared.schemas.telemetry (top-level), shared.utils.config (top-level), shared.schemas.feedback (top-level), shared.schemas.session (top-level), services.coach_ai.schemas (top-level), services.telemetry.main (top-level)
+missing module named uvicorn - imported by services.analytics.main (conditional), services.coach_ai.main (conditional), services.telemetry.main (conditional)
+missing module named 'fastapi.middleware' - imported by services.analytics.main (top-level), services.coach_ai.main (top-level), services.telemetry.main (top-level)
+missing module named fastapi - imported by services.analytics.main (top-level), services.coach_ai.main (top-level), services.telemetry.main (top-level)
+missing module named gtts - imported by services.coach_ai.tts (top-level)
+missing module named openai - imported by services.coach_ai.coaching_engine (top-level)
+missing module named 'sqlalchemy.ext' - imported by services.analytics.models (top-level), services.analytics.repository (top-level), services.analytics.main (top-level)
+missing module named sqlalchemy - imported by services.analytics.database (top-level), services.analytics.models (top-level), services.analytics.repository (top-level), services.analytics.main (top-level)
+missing module named 'sqlalchemy.orm' - imported by services.analytics.models (top-level)
+missing module named pwd - imported by posixpath (delayed, conditional, optional), shutil (delayed, optional), tarfile (optional), pathlib._local (optional), subprocess (delayed, conditional, optional), netrc (delayed, optional), getpass (delayed, optional)
+missing module named numpy - imported by services.telemetry.collector (top-level)
+missing module named 'PySide6.QtWidgets' - imported by C:\Users\aless\Documents\ACC_Coach_AI\launcher\app.py (top-level)
+missing module named 'PySide6.QtGui' - imported by C:\Users\aless\Documents\ACC_Coach_AI\launcher\app.py (top-level)
+missing module named PySide6 - imported by C:\Users\aless\Documents\ACC_Coach_AI\launcher\app.py (top-level)
+missing module named grp - imported by shutil (delayed, optional), tarfile (optional), pathlib._local (optional), subprocess (delayed, conditional, optional)
+missing module named _scproxy - imported by urllib.request (conditional)
+missing module named termios - imported by getpass (optional)
+missing module named fcntl - imported by subprocess (optional)
+missing module named asyncio.DefaultEventLoopPolicy - imported by asyncio (delayed, conditional), asyncio.events (delayed, conditional)

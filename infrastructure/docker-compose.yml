@@ -1,0 +1,88 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7.2-alpine
+    ports:
+      - "6379:6379"
+
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: acc_coach
+      POSTGRES_USER: acc
+      POSTGRES_PASSWORD: acc
+    volumes:
+      - acc-db-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  telemetry:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - ..:/app
+    command: >
+      bash -c "pip install -e . && pip install -r services/telemetry/requirements.txt &&
+      uvicorn services.telemetry.main:app --host 0.0.0.0 --port 8081"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: INFO
+    depends_on:
+      - redis
+
+  analytics:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - ..:/app
+    command: >
+      bash -c "pip install -e . && pip install -r services/analytics/requirements.txt &&
+      uvicorn services.analytics.main:app --host 0.0.0.0 --port 8080"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://acc:acc@db:5432/acc_coach
+      COACH_API_URL: http://coach:8082
+      LOG_LEVEL: INFO
+    depends_on:
+      - redis
+      - db
+
+  coach:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - ..:/app
+    command: >
+      bash -c "pip install -e . && pip install -r services/coach_ai/requirements.txt &&
+      uvicorn services.coach_ai.main:app --host 0.0.0.0 --port 8082"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: INFO
+    depends_on:
+      - redis
+
+  dashboard:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - ..:/app
+    command: >
+      bash -c "pip install -e . && pip install -r frontend/dashboard/requirements.txt &&
+      streamlit run frontend/dashboard/streamlit_app.py --server.address=0.0.0.0"
+    environment:
+      ANALYTICS_API_URL: http://analytics:8080
+      COACH_API_URL: http://coach:8082
+    depends_on:
+      - analytics
+      - coach
+
+  overlay:
+    image: nginx:1.25-alpine
+    ports:
+      - "8090:80"
+    volumes:
+      - ../frontend/overlay:/usr/share/nginx/html:ro
+
+volumes:
+  acc-db-data:

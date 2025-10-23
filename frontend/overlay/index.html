@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="it">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ACC Coach Overlay</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="overlay">
+      <header class="overlay__header">
+        <div class="badge">ACC Coach AI</div>
+        <div class="session-info">
+          <span id="session-id">Sessione: --</span>
+          <span id="lap-info">Lap: --</span>
+        </div>
+      </header>
+      <main class="overlay__content">
+        <section class="delta-card">
+          <div class="delta-card__curve"></div>
+          <div>
+            <p class="delta-card__label">Delta Best</p>
+            <p class="delta-card__value" id="delta-value">+0.000 s</p>
+          </div>
+          <div class="delta-card__kpi">
+            <span>Throttle</span>
+            <strong id="throttle-value">--%</strong>
+          </div>
+        </section>
+        <section class="feedback-stream" id="feedback-stream">
+          <div class="feedback-placeholder">
+            Nessun feedback ancora. Rimani concentrato!
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="./overlay.js" type="module"></script>
+  </body>
+</html>

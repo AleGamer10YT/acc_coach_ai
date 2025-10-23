@@ -1,0 +1,167 @@
+# ACC Coach AI - Architettura di riferimento
+
+## 1. Visione generale
+- **Obiettivo**: fornire coaching virtuale in tempo reale per Assetto Corsa Competizione (ACC), combinando analisi telemetrica, feedback live visivo/vocale e reportistica post-sessione potenziata da AI.
+- **Approccio**: architettura a micro-servizi leggeri orchestrati da un backend Python, con pipeline dati biforcata (real-time e batch) e frontend ibrido (overlay piu dashboard web).
+- **Pilastri**:
+  - Ingestione telemetria ad alta frequenza (Shared Memory o UDP Broadcast ACC).
+  - Motore di analisi streaming con regole deterministiche e modelli ML.
+  - Coach AI che usa LLM e knowledge base delle migliori guide.
+  - Persistenza e analytics avanzato per reportistica e confronto giri.
+
+```
+ACC (Shared Memory / UDP) -> Telemetry Collector -> Stream Processor -> Feedback Hub -> Overlay / TTS
+                                           -> Coach AI (LLM)
+                                           -> Session Store -> Analytics Jobs -> Report Generator -> Dashboard Web
+```
+
+## 2. Moduli principali
+### 2.1 Telemetry Collector
+- Listener UDP (Python asyncio) piu reader Shared Memory (ctypes) per massima compatibilita.
+- Pubblica eventi normalizzati `TelemetryFrame` su Redis Streams o RabbitMQ (topic `telemetry.raw`).
+- Gestione sincronizzazione sessioni e giri (UUID sessione, contatore lap).
+
+### 2.2 Stream Processor (Realtime Analytics)
+- Servizio Python (FastAPI con uvicorn) con worker asincroni.
+- Pipeline (es. Bytewax o Faust) per:
+  - Segmentazione giro (curve e rettilinei) tramite mappe pista pre-caricate (`track_sections.json`).
+  - KPI realtime (delta tempo, speed variance, brake/accel thresholds).
+  - Regole esperte (es. se frenata oltre soglia prima del punto ottimale -> warning).
+- Emissione eventi `FeedbackEvent` via WebSocket verso overlay e TTS.
+
+### 2.3 Session Store e Database
+- PostgreSQL (prod) o SQLite (dev) con schema:
+  - `sessions(id, driver_id, track_id, car_model, start_ts, end_ts, fastest_lap_id, consistency_score, notes)`
+  - `laps(id, session_id, lap_number, lap_time_ms, is_best, weather, tyre_compound)`
+  - `lap_sections(id, lap_id, section_id, name, delta_time_ms, avg_speed, throttle_avg, brake_avg, steering_avg)`
+  - `telemetry_points(id, lap_id, timestamp, distance_m, speed, throttle, brake, gear, steering, accel_lat, accel_long)`
+- Indici per query lap-to-lap e ricostruzione traiettorie.
+
+### 2.4 Coach AI Engine
+- Pipeline doppia:
+  1. **Model Inference**: modelli supervisionati (es. gradient boosting) per classificare pattern come over-braking o early throttle.
+  2. **LLM Feedback**: orchestratore FastAPI che costruisce prompt con:
+     - telemetria aggregata (JSON condensato),
+     - benchmark giro ideale (dataset pro),
+     - storico suggerimenti per evitare ripetizioni.
+  - Integrazione con OpenAI GPT-5 (API) o modelli locali HuggingFace via text-generation-inference.
+- Knowledge base versionata (`/models/reference_laps/track_id_car_id.json`).
+
+### 2.5 Feedback Hub
+- Espone WebSocket server (`/ws/feedback`) e canale MQTT opzionale.
+- Gestisce priorita messaggi (critico, suggerimento, info).
+- Gateway TTS: wrapper su ElevenLabs (primario) con fallback gTTS offline.
+
+### 2.6 Overlay e Dashboard realtime
+- Overlay:
+  - Electron con obs-websocket-js per integrazione OBS oppure overlay trasparente basato su Chromium.
+  - Widgets: delta tempo, indicatori frenata, suggerimenti testuali, indicatori colore (verde miglioramento, rosso errore).
+- Dashboard realtime opzionale:
+  - Next.js + Chakra UI, subscribe WebSocket per heatmap live.
+
+### 2.7 Report Generator e Web Dashboard
+- Servizio batch (trigger a fine sessione).
+- Librerie: Pandas, Plotly, Altair.
+- Output:
+  - Grafico traiettoria (Plotly scatter).
+  - Heatmap frenata/accelerazione per sezione.
+  - Tabella curve critiche con delta medio vs best lap.
+  - Score `consistency` (deviazione standard tempi giro) e `efficiency` (uso throttle/brake vs benchmark).
+- Frontend dati: Streamlit per MVP, successivamente Next.js con API FastAPI (`/api/reports/{session_id}`).
+
+## 3. Flussi dati
+### 3.1 Real-time
+1. ACC invia frame (60 Hz) -> Telemetry Collector.
+2. Normalizzazione e pubblicazione stream.
+3. Stream Processor calcola indicatori e identifica eventi di coaching.
+4. Feedback Hub inoltra overlay, TTS e logging.
+
+### 3.2 Batch post-sessione
+1. Fine sessione -> trigger (`SessionEndEvent`).
+2. Persistenza giri e telemetria grezza.
+3. Analytics job offline (Celery beat o Prefect flow):
+   - Calcolo best lap.
+   - Confronto con reference lap (se disponibile).
+   - Generazione features ML (time lost per curva, slip ratio se presente).
+4. Coach AI produce report testuale (LLM) e suggerimenti.
+5. Dashboard web mostra risultati e permette confronto giri.
+
+## 4. AI e Machine Learning
+- **Dataset**: raccolta giri utente piu giri ideali (es. community, piloti pro). Storage in file parquet su MinIO o S3.
+- **Feature engineering**:
+  - Input finestra scorrevole (velocita, throttle, brake, steering).
+  - Derivate (delta tempo, delta angolo sterzo, slip).
+  - Classificazione eventi (oversteer, understeer, brake troppo presto/tardi, throttle modulation).
+- **Model zoo**:
+  - Regole baseline (threshold per track/section).
+  - Gradient boosted trees per classificare pattern.
+  - Reti LSTM o Temporal Convolution per stima best line.
+- **LLM**:
+  - Prompt template multi-lingua con contesto track e stile coach.
+  - Memoria breve termine: ultimi N suggerimenti per evitare ripetizioni.
+  - Controllo costi API (cache, batching).
+
+## 5. Tecnologie consigliate
+- **Backend**: Python 3.11, FastAPI, Pydantic, SQLAlchemy.
+- **Stream**: Redis Streams per MVP, valutare Kafka se serve scalare.
+- **Task scheduling**: Celery con Redis oppure Prefect.
+- **Frontend**: Next.js 14 (App Router), Tailwind o Chakra, Plotly.js.
+- **Realtime overlay**: Electron app con WebSocket client, supporto avvio insieme al gioco.
+- **Infra**: Docker Compose per sviluppo, Kubernetes per scalabilita. Logging con Grafana/Loki, metriche Prometheus.
+- **Auth**: OAuth2 (Google o Steam) per multi-driver, JWT per API.
+
+## 6. API e contratti dati
+- `GET /api/sessions/{id}`: ritorna meta e KPI.
+- `GET /api/sessions/{id}/laps`: elenco giri con tempi e rating.
+- `GET /api/laps/{id}/sections`: dettagli sezione.
+- `POST /api/feedback/ack`: overlay segnala suggerimento mostrato (per telemetria di efficacia).
+- WebSocket payload esempio:
+```json
+{
+  "type": "coaching_tip",
+  "severity": "warning",
+  "lap": 12,
+  "section": "Curva 5",
+  "message": "Frana 4 m piu tardi e modula il rilascio del freno al 30%",
+  "metrics": {
+    "brake_point_delta_m": -4.1,
+    "speed_entry_delta_kph": -6.5
+  }
+}
+```
+
+## 7. Componenti aggiuntivi
+- **Comparatore giri**: UI per sovrapporre due giri (utente vs best) con slider temporale e grafici differenze.
+- **Punteggio consistenza**: calcolo deviazione standard tempi giro piu penalita per errori ripetuti.
+- **Sistema progressione**: regole business (XP e badge) con persistenza in tabella `achievements`.
+- **Integrazione comunita**: esportazione JSON o CSV per condividere sessioni con coach o compagni.
+
+## 8. Sicurezza e resilienza
+- Limitare latenza real-time sotto 150 ms (collector -> overlay).
+- Circuit breaker per chiamate LLM e TTS, con caching suggerimenti di fallback.
+- Gestione offline: se DB non disponibile, scrittura su file locale append-only e replay successivo.
+- Test unitari piu simulatore telemetria (playback file `.accdata`) per QA.
+
+## 9. Roadmap suggerita
+1. **MVP ingest e feedback base (4-6 settimane)**
+   - Collector UDP con normalizzazione.
+   - Stream Processor con regole statiche (frenata anticipata, throttle tardivo).
+   - Overlay minimale con indicatori base.
+   - Persistenza sessioni e lap in SQLite.
+2. **Reportistica e comparatore (3-4 settimane)**
+   - Batch analytics e grafici Plotly o Streamlit.
+   - Export best lap e confronto curva per curva.
+3. **Coach AI avanzato (4-6 settimane)**
+   - Addestramento modelli pattern.
+   - Integrazione LLM per feedback naturale multi-lingua.
+   - TTS e personalizzazione stile coach.
+4. **Scalabilita e polishing (continuo)**
+   - Migrazione PostgreSQL, ottimizzazione overlay.
+   - Sistema progressione, leaderboard, servizio auth.
+
+## 10. Prossimi passi operativi
+- Configurare repo monorepo con cartelle: `services/telemetry`, `services/analytics`, `services/coach_ai`, `frontend/overlay`, `frontend/dashboard`, `infrastructure`.
+- Creare simulatore telemetria per sviluppo offline.
+- Definire contratti Pydantic condivisi (`shared/schemas`).
+- Setup CI (GitHub Actions) con lint, test e mypy.
+- Stabilire KPI iniziali (tempo perso per curva, consistenza, efficienza) e relative soglie.
