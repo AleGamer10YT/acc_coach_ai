@@ -1,20 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_submodules
 
-datas = []
-binaries = []
-hiddenimports = ['PySide6.QtXml']
-tmp_ret = collect_all('services')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('shared')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+hiddenimports = ['aiosqlite']
+hiddenimports += collect_submodules('aiosqlite')
 
 
 a = Analysis(
-    ['C:\\Users\\aless\\Documenti\\ACC_Coach_AI\\launcher\\app.py'],
+    ['C:\\Users\\aless\\Documents\\GitHub\\acc_coach_ai\\launcher\\app.py'],
     pathex=[],
-    binaries=binaries,
-    datas=datas,
+    binaries=[],
+    datas=[],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -44,4 +39,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['C:\\Users\\aless\\Documents\\GitHub\\acc_coach_ai\\resources\\acc_icon.ico'],
 )

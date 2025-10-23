@@ -9,7 +9,7 @@ from enum import Enum
 from pathlib import Path
 from typing import AsyncIterator, Optional
 
-import numpy as np
+import random
 from pydantic import BaseModel, Field
 
 from shared.schemas.telemetry import SessionPhase, TelemetryFrame
@@ -172,7 +172,7 @@ class TelemetryCollector:
     async def _run_shared_memory(self, config: CollectorConfig) -> None:
         # ACC Shared Memory richiede integrazione Ctypes; qui forniamo placeholder con rumore
         logger.warning("Shared memory non implementata - uso dati sintetici temporanei")
-        rng = np.random.default_rng()
+        rng = random.Random()
         base_ts = time.time()
         lap = 0
         while not self._stop_event.is_set():
@@ -183,15 +183,15 @@ class TelemetryCollector:
                 timestamp=timestamp,
                 lap=lap,
                 lap_time_ms=int((timestamp - base_ts) * 1000),
-                speed_kph=150 + rng.normal(0, 5),
-                throttle=float(np.clip(rng.normal(0.8, 0.1), 0, 1)),
-                brake=float(np.clip(rng.normal(0.1, 0.05), 0, 1)),
-                steering=float(np.clip(rng.normal(0.0, 0.2), -1, 1)),
-                gear=int(np.clip(rng.integers(3, 6), 1, 6)),
-                world_pos_x=float(rng.normal(0, 1)),
-                world_pos_y=float(rng.normal(0, 1)),
-                world_pos_z=float(rng.normal(0, 1)),
-                track_spline_pos=float(np.clip((timestamp - base_ts) % 1.0, 0, 1)),
+                speed_kph=150 + rng.gauss(0, 5),
+                throttle=max(0.0, min(1.0, rng.gauss(0.8, 0.1))),
+                brake=max(0.0, min(1.0, rng.gauss(0.1, 0.05))),
+                steering=max(-1.0, min(1.0, rng.gauss(0.0, 0.2))),
+                gear=max(1, min(6, rng.randint(3, 6))),
+                world_pos_x=rng.gauss(0, 1),
+                world_pos_y=rng.gauss(0, 1),
+                world_pos_z=rng.gauss(0, 1),
+                track_spline_pos=max(0.0, min(1.0, (timestamp - base_ts) % 1.0)),
                 player_car="unknown",
                 track_name="unknown",
                 session_phase=SessionPhase.OTHER,

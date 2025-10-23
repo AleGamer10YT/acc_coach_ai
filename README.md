@@ -1,66 +1,66 @@
 # ACC Coach AI
 
-Coach virtuale intelligente per Assetto Corsa Competizione con analisi telemetrica in tempo reale, feedback live e reportistica post-sessione potenziata da AI.
+ACC Coach AI is a desktop assistant for Assetto Corsa Competizione that ingests telemetry, analyses driving patterns, and delivers coaching tips in real time. Everything runs locally inside a single PySide6 application—no browser windows or localhost tabs required.
 
-## Monorepo
-```
-services/
-  telemetry/      # Ingestione telemetria ACC e simulatore
-  analytics/      # Stream processor, API realtime, persistenza
-  coach_ai/       # Suggerimenti naturali via LLM/TTS
-shared/           # Schemi Pydantic, utilita comuni
-infrastructure/   # Docker Compose, provisioning locali
-data/             # Dataset e playback
-scripts/          # Utility CLI (es. replay telemetria)
-launcher/         # Applicazione desktop (PySide6) per setup e coaching
-```
+## Highlights
 
-Per dettagli architetturali vedi il documento `Base`.
+- **One-click desktop experience** – a dark OLED‑style UI with sidebar navigation (Dashboard, Download, Settings, Coach).
+- **Automatic dependency bootstrap** – when you launch `python launcher/app.py`, any missing Python packages (PySide6, FastAPI, etc.) are installed automatically.
+- **Self-service coach** – download or update the project files from GitHub, enter your API keys once, and start the telemetry simulator or connect ACC for live feedback.
+- **Data-driven dashboard** – cards and progress bars summarise the most recent session (track, car, laps, consistency, efficiency, best lap).
 
-## Setup rapido
-1. Copia `.env.example` in `.env` e personalizza credenziali (es. `OPENAI_API_KEY`).
-2. Avvia lo stack completo con Docker Compose **oppure** usa l'app desktop (`python launcher/app.py`):
-   ```bash
-   cd infrastructure
-   docker compose up --build
-   ```
-   Servizi esposti:
-   - Telemetry API -> `http://localhost:8081`
-   - Analytics + WebSocket -> `http://localhost:8080`
-   - Coach AI -> `http://localhost:8082`
-   - Dashboard Streamlit -> `http://localhost:8501`
-   - Overlay statico -> `http://localhost:8090`
-3. (Facoltativo) riproduci la telemetria demo:
-   ```bash
-   python scripts/playback_simulation.py --loop
-   ```
+## Getting Started
 
-## Servizi backend
-- **Telemetry Collector** (`services/telemetry`): ascolta ACC (UDP/shared memory) o file simulati e pubblica frame normalizzati su Redis o coda in-memory.
-- **Analytics API** (`services/analytics`): calcola KPI in streaming, salva sessioni su SQLite/PostgreSQL e diffonde `FeedbackEvent` per il coach.
-- **Coach AI** (`services/coach_ai`): coordina modelli ML/LLM e TTS, con fallback rule-based se manca la chiave API.
+### Requirements
 
-Avvio stand-alone:
+- Windows 10/11 (tested)  
+- Python 3.11+ (only if you run from source or build the executable)  
+- Docker Desktop (optional, for a full microservice stack or analytics via containers)
+
+### Run from Source
+
 ```bash
-pip install -e .
-uvicorn services.<nome>.main:app --reload
+git clone https://github.com/<your-account>/acc_coach_ai.git
+cd acc_coach_ai
+python launcher/app.py
 ```
-Ricorda di impostare `PYTHONPATH=.` se lanci senza installazione.
 
-## Interfaccia desktop
-- **ACC Coach Desktop** (`launcher/app.py`): applicazione PySide6 con homepage, gestione download dal repository, configurazione API e sezione Coach AI per avviare i servizi locali senza usare pagine web.
-- Legacy: le directory `frontend/overlay` e `frontend/dashboard` contengono gli asset web storici.
+The first launch triggers the automatic installation of all required Python packages. The app opens with the Dashboard view; use the sidebar to download assets, configure API keys, and start the coach.
 
-## Script utili
-- `scripts/playback_simulation.py`: replay di file JSONL (`data/simulations/sample_lap.jsonl`) verso il bus telemetria.
-- `data/simulations/sample_lap.jsonl`: giro demo Monza GT3 per test rapidi.
+### Build the Windows Executable
 
-## Launcher Windows
-- Lancia `python launcher/app.py` per usare l'app desktop.
-- Per creare un `.exe` one-file: `powershell -ExecutionPolicy Bypass -File tools/build_launcher.ps1`. Consulta `SETUP_GUIDE.md` per la distribuzione automatica (download GitHub, configurazione e avvio servizi).
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/build_launcher.ps1 -Clean
+# Output: dist\ACCCoachLauncher.exe
+```
 
-## Flusso di test rapido
-1. Avvia l'app desktop (`python launcher/app.py` o l'eseguibile compilato).
-2. Dalla home scegli "Download/Aggiornamento" per scaricare la release da GitHub (se necessario).
-3. Configura le API key nella sezione dedicata.
-4. Apri il menu "Coach AI", seleziona il file di telemetria (es. `data/simulations/sample_lap.jsonl`) e premi "Avvia servizi". I feedback appaiono direttamente nell'interfaccia.
+Share the generated `.exe` directly—PyInstaller bundles PySide6 and every runtime dependency, so the end user only needs to double-click the executable.
+
+## Typical Workflow
+
+1. **Download** – open the “Download” section and provide the GitHub ZIP URL (branch or release). The launcher will fetch or update the local install directory.
+2. **Settings** – enter the required API keys (e.g. `OPENAI_API_KEY`) and save. Until the keys are present, the Coach section remains disabled to avoid accidental runs.
+3. **Coach** – choose a telemetry source:
+   - play back the sample session stored in `data/simulations/sample_lap.jsonl`, or  
+   - connect to live ACC telemetry.
+   Real-time feedback appears directly in the Coach page log.
+4. **Dashboard** – monitor the latest session metrics (laps, best lap, consistency, efficiency) on the home page.
+
+## Repository Layout
+
+```
+services/      backend services (telemetry collector, analytics, coach AI)
+shared/        shared schemas and utilities
+launcher/      PySide6 desktop application
+infrastructure docker-compose and infrastructure assets
+data/          sample telemetry data
+scripts/       helper scripts (e.g. telemetry playback)
+```
+
+## Need Help in Italian?
+
+A full Italian version of this README is available in **README.it.md**, covering the same topics (overview, usage, and build steps) per gli utenti preferibilmente in lingua italiana.
+
+---
+
+Happy racing! If you have ideas for new coaching features or UI tweaks, feel free to open an issue or submit a pull request.

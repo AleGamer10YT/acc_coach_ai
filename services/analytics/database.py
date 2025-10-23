@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+try:  # SQLAlchemy >=1.4
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+except ImportError:  # pragma: no cover - fallback for trimmed builds
+    from sqlalchemy.orm import sessionmaker
+
+    def async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession):
+        return sessionmaker(bind=engine, expire_on_commit=expire_on_commit, class_=class_)
 
 from shared.utils.config import get_settings
 from shared.utils.logging import configure_logging

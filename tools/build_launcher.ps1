@@ -23,6 +23,7 @@ if ($Clean) {
     Write-Host "Pulizia cartelle build/dist..." -ForegroundColor Yellow
     Remove-Item -Force -Recurse -ErrorAction SilentlyContinue (Join-Path $root "build")
     Remove-Item -Force -Recurse -ErrorAction SilentlyContinue (Join-Path $root "dist")
+    Remove-Item -ErrorAction SilentlyContinue (Join-Path $root "ACCCoachLauncher.spec")
 }
 
 Write-Host "Compilazione launcher in corso..." -ForegroundColor Cyan
@@ -33,9 +34,9 @@ python -m PyInstaller `
     --onefile `
     --noconsole `
     --clean `
-    --collect-all services `
-    --collect-all shared `
-    --hidden-import PySide6.QtXml
+    --hidden-import aiosqlite `
+    --collect-submodules aiosqlite `
+    --icon "$root\resources\acc_icon.ico"
 
 $exePath = Join-Path $root "dist\$OutputName.exe"
 
