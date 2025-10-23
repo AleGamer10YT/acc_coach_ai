@@ -6,7 +6,7 @@ ACC Coach AI è un assistente da scrivania per Assetto Corsa Competizione. Racco
 
 - **Interfaccia OLED stile dashboard** – sidebar con le sezioni Dashboard, Download, Impostazioni e Coach, grafica nero/rosso/giallo.
 - **Bootstrap automatico delle dipendenze** – se avvii `python launcher/app.py`, lo script installa in autonomia i pacchetti Python mancanti (PySide6, FastAPI, ecc.).
-- **Coach self-service** – scarica/aggiorna i file dal tuo repository GitHub, salva le API key e avvia la simulazione o collegati ad ACC per il coaching live.
+- **Coach self-service** – scarica/aggiorna i file dal tuo repository GitHub, salva la API key di Google AI Studio e avvia la simulazione o collegati ad ACC per il coaching live.
 - **Dashboard dati** – card e barre mostrano l’ultima sessione (tracciato, vettura, giri, consistenza, efficienza, miglior giro).
 
 ## Prerequisiti
@@ -37,7 +37,7 @@ L’eseguibile contiene già tutte le librerie: è sufficiente distribuirlo e fa
 ## Flusso consigliato
 
 1. **Download** – nella sezione omonima inserisci l’URL ZIP del tuo repository GitHub (branch o release). Il launcher scarica/aggiorna i file nella cartella indicata.
-2. **Impostazioni** – compila le API key obbligatorie (es. `OPENAI_API_KEY`) e salva. Finché le chiavi non sono presenti, la sezione Coach resta disabilitata.
+2. **Impostazioni** - compila le API key obbligatorie (es. `GOOGLE_API_KEY` di Google AI Studio) e salva. Finche le chiavi non sono presenti, la sezione Coach resta disabilitata.
 3. **Coach** – scegli un file di telemetria (es. `data/simulations/sample_lap.jsonl`) oppure collega ACC. I suggerimenti compaiono direttamente nel log della pagina.
 4. **Dashboard** – la home riepiloga l’ultima sessione: giri, consistenza, efficienza, miglior tempo.
 

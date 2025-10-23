@@ -44,7 +44,7 @@ ACC (Shared Memory / UDP) -> Telemetry Collector -> Stream Processor -> Feedback
      - telemetria aggregata (JSON condensato),
      - benchmark giro ideale (dataset pro),
      - storico suggerimenti per evitare ripetizioni.
-  - Integrazione con OpenAI GPT-5 (API) o modelli locali HuggingFace via text-generation-inference.
+  - Integrazione con Google Gemini 2.5 Pro (API) o modelli locali HuggingFace via text-generation-inference.
 - Knowledge base versionata (`/models/reference_laps/track_id_car_id.json`).
 
 ### 2.5 Feedback Hub

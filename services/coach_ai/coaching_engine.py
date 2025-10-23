@@ -5,7 +5,7 @@ import hashlib
 import os
 from typing import Dict, Optional
 
-from openai import AsyncOpenAI, BadRequestError
+import google.generativeai as genai
 
 from shared.schemas.feedback import FeedbackSeverity
 from shared.utils.logging import configure_logging
@@ -19,14 +19,15 @@ logger = configure_logging("coach_ai.engine")
 class CoachingEngine:
     def __init__(self, tts_service: TTSService) -> None:
         self.tts_service = tts_service
-        api_key = os.getenv("OPENAI_API_KEY")
-        self.openai: Optional[AsyncOpenAI] = None
+        api_key = os.getenv("GOOGLE_API_KEY")
+        self.model_name = "gemini-2.5-pro"
+        self.gemini_model: Optional[genai.GenerativeModel] = None
         if api_key:
-            self.openai = AsyncOpenAI(api_key=api_key)
-            logger.info("OpenAI abilitato per coach AI")
+            genai.configure(api_key=api_key)
+            self.gemini_model = genai.GenerativeModel(self.model_name)
+            logger.info("Gemini 2.5 Pro abilitato per coach AI")
         else:
-            logger.warning("OPENAI_API_KEY non impostata: uso fallback rule-based")
-        self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+            logger.warning("GOOGLE_API_KEY non impostata: uso fallback rule-based")
         self.cache: Dict[str, CoachingResponse] = {}
 
     async def generate_feedback(self, request: CoachingRequest) -> CoachingResponse:
@@ -39,13 +40,11 @@ class CoachingEngine:
         severity = FeedbackSeverity.SUGGESTION
         bullet_points: list[str] = []
 
-        if self.openai:
+        if self.gemini_model:
             try:
-                text, bullet_points, severity = await self._ask_openai(request)
-            except BadRequestError as exc:
-                logger.error("Errore OpenAI: %s", exc)
+                text, bullet_points, severity = await self._ask_gemini(request)
             except Exception as exc:  # pragma: no cover
-                logger.exception("OpenAI failure: %s", exc)
+                logger.exception("Gemini failure: %s", exc)
 
         if text is None:
             text, bullet_points, severity = self._fallback_response(request)
@@ -64,10 +63,10 @@ class CoachingEngine:
         self.cache[cache_key] = response
         return response
 
-    async def _ask_openai(
+    async def _ask_gemini(
         self, request: CoachingRequest
     ) -> tuple[str, list[str], FeedbackSeverity]:
-        assert self.openai is not None
+        assert self.gemini_model is not None
         system_prompt = (
             "Sei un coach di guida GT3 per Assetto Corsa Competizione. "
             "Offri consigli pratici, puntuali e concreti. "
@@ -90,15 +89,13 @@ class CoachingEngine:
             "Genera risposta con schema: paragrafo breve + elenco puntato + call to action."
         )
 
-        completion = await self.openai.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.4,
+        prompt = f"{system_prompt}\n\n{user_prompt}"
+        response = await asyncio.to_thread(
+            self.gemini_model.generate_content,
+            prompt,
+            generation_config={"temperature": 0.4, "max_output_tokens": 512},
         )
-        message = completion.choices[0].message.content or ""
+        message = getattr(response, "text", "") or ""
         bullet_points = self._extract_bullets(message)
         severity = self._estimate_severity(request.issues, request.metrics)
         return message, bullet_points, severity

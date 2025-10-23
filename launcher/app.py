@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 import importlib.util
+import math
 
 
 def ensure_runtime_dependencies() -> None:
@@ -32,6 +33,7 @@ def ensure_runtime_dependencies() -> None:
         "redis": "redis==5.0.3",
         "dateutil": "python-dateutil==2.9.0",
         "aiofiles": "aiofiles==23.2.1",
+        "google.generativeai": "google-generativeai==0.7.2",
     }
     missing: list[str] = []
     for module, requirement in required.items():
@@ -50,7 +52,7 @@ ensure_runtime_dependencies()
 
 
 from PySide6.QtCore import QObject, QSize, Qt, QThread, Signal  # noqa: E402  pylint: disable=wrong-import-position
-from PySide6.QtGui import QCloseEvent, QPixmap  # noqa: E402  pylint: disable=wrong-import-position
+from PySide6.QtGui import QCloseEvent, QPixmap, QIcon  # noqa: E402  pylint: disable=wrong-import-position
 from PySide6.QtWidgets import (  # noqa: E402  pylint: disable=wrong-import-position
     QApplication,
     QFileDialog,
@@ -69,6 +71,13 @@ from PySide6.QtWidgets import (  # noqa: E402  pylint: disable=wrong-import-posi
     QWidget,
     QComboBox,
     QFrame,
+    QCheckBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QListWidget,
+    QAbstractItemView,
+    QListWidgetItem,
 )
 
 from services.analytics.engine import RealtimeAnalyticsEngine  # noqa: E402  pylint: disable=wrong-import-position
@@ -82,10 +91,9 @@ DEFAULT_VALUES: Dict[str, str] = {
     "COACH_API_URL": "http://localhost:8082",
     "OVERLAY_WS_URL": "ws://localhost:8080/ws/feedback",
     "DASHBOARD_URL": "http://localhost:8501",
-    "OPENAI_API_KEY": "",
-    "OPENAI_MODEL": "gpt-4o-mini",
+    "GOOGLE_API_KEY": "",
     "ENABLE_TTS": "0",
-    "TTS_PROVIDER": "gtts",
+    "TTS_PROVIDER": "elevenlabs",
     "ELEVENLABS_API_KEY": "",
     "TTS_OUTPUT_DIR": "data/audio",
     "REPO_ZIP_URL": "https://github.com/<user>/acc_coach_ai/archive/refs/heads/main.zip",
@@ -93,16 +101,9 @@ DEFAULT_VALUES: Dict[str, str] = {
 }
 
 ENV_FIELDS = [
-    ("OPENAI_API_KEY", "OpenAI API Key"),
-    ("OPENAI_MODEL", "Modello OpenAI"),
-    ("ENABLE_TTS", "Abilita TTS (0/1)"),
-    ("TTS_PROVIDER", "Provider TTS"),
+    ("GOOGLE_API_KEY", "Google AI Studio API Key"),
     ("ELEVENLABS_API_KEY", "ElevenLabs API Key"),
     ("TTS_OUTPUT_DIR", "Cartella output TTS"),
-    ("APP_ENV", "Ambiente"),
-    ("LOG_LEVEL", "Log level"),
-    ("REDIS_URL", "Redis URL"),
-    ("DATABASE_URL", "Database URL"),
 ]
 
 PRIMARY_BG = "#050505"
@@ -114,11 +115,131 @@ ACCENT_GLOW = "#8c1a1a"
 TEXT_PRIMARY = "#f2f2f2"
 TEXT_MUTED = "#9b9b9b"
 
+APP_ICON_FILENAME = "acc_icon_png.png"
+
 
 def resource_path() -> Path:
     if hasattr(sys, "_MEIPASS"):
         return Path(sys._MEIPASS)  # type: ignore[attr-defined]
     return Path(__file__).resolve().parent.parent
+
+
+def app_icon_path() -> Path:
+    return resource_path() / "resources" / APP_ICON_FILENAME
+
+
+def load_app_icon() -> QIcon:
+    path = app_icon_path()
+    icon = QIcon(str(path))
+    if icon.isNull():
+        pix = QPixmap(str(path))
+        if not pix.isNull():
+            icon = QIcon(pix)
+    return icon
+
+
+def load_app_pixmap(size: int) -> QPixmap:
+    path = app_icon_path()
+    pix = QPixmap(str(path))
+    if not pix.isNull() and size > 0:
+        return pix.scaled(
+            size,
+            size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+    icon = load_app_icon()
+    pm = icon.pixmap(size, size)
+    if not pm.isNull():
+        return pm
+    return QPixmap()
+
+
+def load_lap_analysis_data(env_manager: EnvManager) -> dict[str, dict[str, dict]]:
+    db_path = resolve_database_path(env_manager)
+    if not db_path:
+        return {}
+    try:
+        import sqlite3
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        data: dict[str, dict[str, dict]] = {}
+        sessions = conn.execute(
+            "SELECT id, track_name, car_model, fastest_lap_id FROM sessions ORDER BY started_at DESC"
+        ).fetchall()
+        for session in sessions:
+            track = session["track_name"] or "Sconosciuto"
+            car = session["car_model"] or "Sconosciuto"
+            data.setdefault(track, {})
+            if car in data[track]:
+                continue
+            analysis: dict[str, object] = {"ideal": None, "laps": []}
+            sections_cache: dict[int, list[dict[str, Optional[float]]]] = {}
+            lap_rows = conn.execute(
+                "SELECT id, lap_number, lap_time_ms FROM laps WHERE session_id = ? ORDER BY lap_number DESC LIMIT 10",
+                (session["id"],),
+            ).fetchall()
+            laps_list: list[dict[str, object]] = []
+            for lap_row in lap_rows:
+                section_rows = conn.execute(
+                    "SELECT section_id, name, delta_time_ms FROM lap_sections WHERE lap_id = ? ORDER BY id ASC",
+                    (lap_row["id"],),
+                ).fetchall()
+                sections_list = [
+                    {
+                        "section_id": sec["section_id"],
+                        "name": sec["name"],
+                        "delta_time_ms": sec["delta_time_ms"],
+                    }
+                    for sec in section_rows
+                ]
+                sections_cache[lap_row["id"]] = sections_list
+                laps_list.append(
+                    {
+                        "lap_id": lap_row["id"],
+                        "lap_number": lap_row["lap_number"],
+                        "lap_time_ms": lap_row["lap_time_ms"],
+                        "sections": sections_list,
+                    }
+                )
+            fastest_id = session["fastest_lap_id"]
+            fastest_entry = None
+            if fastest_id:
+                fastest_entry = conn.execute(
+                    "SELECT id, lap_number, lap_time_ms FROM laps WHERE id = ?", (fastest_id,)
+                ).fetchone()
+            ideal_payload = None
+            if fastest_entry:
+                best_sections = sections_cache.get(fastest_entry["id"])
+                if best_sections is None:
+                    section_rows = conn.execute(
+                        "SELECT section_id, name, delta_time_ms FROM lap_sections WHERE lap_id = ? ORDER BY id ASC",
+                        (fastest_entry["id"],),
+                    ).fetchall()
+                    best_sections = [
+                        {
+                            "section_id": sec["section_id"],
+                            "name": sec["name"],
+                            "delta_time_ms": sec["delta_time_ms"],
+                        }
+                        for sec in section_rows
+                    ]
+                ideal_payload = {
+                    "lap_id": fastest_entry["id"],
+                    "lap_number": fastest_entry["lap_number"],
+                    "lap_time_ms": fastest_entry["lap_time_ms"],
+                    "sections": best_sections or [],
+                }
+            if ideal_payload and not any(l["lap_id"] == ideal_payload["lap_id"] for l in laps_list):
+                laps_list.append(ideal_payload)
+            analysis["ideal"] = ideal_payload
+            analysis["laps"] = laps_list
+            data[track][car] = analysis
+        conn.close()
+        return data
+    except Exception:
+        return {}
 
 
 class EnvManager:
@@ -135,6 +256,12 @@ class EnvManager:
                 continue
             key, value = line.split("=", 1)
             self.values[key.strip()] = value.strip()
+        # Backward compatibility: migrate legacy OpenAI keys to Google AI Studio
+        legacy_key = self.values.pop("OPENAI_API_KEY", "").strip()
+        if legacy_key and not self.values.get("GOOGLE_API_KEY"):
+            self.values["GOOGLE_API_KEY"] = legacy_key
+        # Remove deprecated OpenAI model entry if present
+        self.values.pop("OPENAI_MODEL", None)
 
     def save(self) -> None:
         env_file = resource_path() / ".env"
@@ -153,7 +280,7 @@ class EnvManager:
         return Path(self.values.get("INSTALL_DIR", DEFAULT_VALUES["INSTALL_DIR"])).expanduser().resolve()
 
     def has_required_api_keys(self) -> bool:
-        required = ["OPENAI_API_KEY"]
+        required = ["GOOGLE_API_KEY"]
         return all(self.values.get(key) for key in required)
 
     @staticmethod
@@ -283,21 +410,8 @@ def download_and_extract(zip_url: str, target_dir: Path) -> None:
 
 
 def get_last_session_summary(env_manager: EnvManager) -> Optional[Dict[str, str]]:
-    db_url = env_manager.values.get("DATABASE_URL", "")
-    if "sqlite" not in db_url:
-        return None
-    path_part = ""
-    if ":///" in db_url:
-        path_part = db_url.split(":///", 1)[1]
-    elif "://" in db_url:
-        path_part = db_url.split("://", 1)[1]
-    if not path_part:
-        return None
-    db_path = Path(path_part)
-    if not db_path.is_absolute():
-        db_path = env_manager.get_install_dir() / db_path
-    db_path = db_path.resolve()
-    if not db_path.exists():
+    db_path = resolve_database_path(env_manager)
+    if not db_path:
         return None
     try:
         import sqlite3
@@ -340,6 +454,26 @@ def format_lap_time(ms: Optional[int]) -> str:
     return f"{minutes:02d}:{remaining:05.2f}"
 
 
+def resolve_database_path(env_manager: EnvManager) -> Optional[Path]:
+    db_url = env_manager.values.get("DATABASE_URL", "")
+    if "sqlite" not in db_url:
+        return None
+    path_part = ""
+    if ":///" in db_url:
+        path_part = db_url.split(":///", 1)[1]
+    elif "://" in db_url:
+        path_part = db_url.split("://", 1)[1]
+    if not path_part:
+        return None
+    db_path = Path(path_part)
+    if not db_path.is_absolute():
+        db_path = env_manager.get_install_dir() / db_path
+    db_path = db_path.resolve()
+    if not db_path.exists():
+        return None
+    return db_path
+
+
 class SidebarButton(QPushButton):
     def __init__(self, text: str) -> None:
         super().__init__(text)
@@ -360,14 +494,11 @@ class Sidebar(QWidget):
         layout.setSpacing(18)
 
         icon_label = QLabel()
-        icon_path = resource_path() / "resources" / "acc_icon.ico"
-        pix = QPixmap(str(icon_path))
+        pix = load_app_pixmap(60)
         if not pix.isNull():
-            icon_label.setPixmap(
-                pix.scaled(60, 60, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            )
+            icon_label.setPixmap(pix)
         else:
-            icon_label.setText("ACC Coach")
+            icon_label.setText("ACC Coach AI")
             icon_label.setStyleSheet(f"color: {ACCENT_RED}; font-size: 24px; font-weight: 700; letter-spacing: 0.08em;")
         layout.addWidget(icon_label, alignment=Qt.AlignmentFlag.AlignLeft)
 
@@ -432,10 +563,24 @@ class HomePage(QWidget):
         self.banner.setFrameShape(QFrame.Shape.NoFrame)
         banner_layout = QVBoxLayout(self.banner)
         banner_layout.setContentsMargins(24, 24, 24, 24)
-        self.banner_title = QLabel("Benvenuto in ACC Coach")
+        logo_row = QHBoxLayout()
+        logo_row.setContentsMargins(0, 0, 0, 0)
+        logo_row.setSpacing(16)
+        logo_label = QLabel()
+        logo_label.setObjectName("dashboardLogo")
+        logo_pixmap = load_app_pixmap(64)
+        if not logo_pixmap.isNull():
+            logo_label.setPixmap(logo_pixmap)
+        else:
+            logo_label.setText("ACC Coach AI")
+            logo_label.setStyleSheet("font-size: 22px; font-weight: 700; letter-spacing: 0.05em;")
+        logo_row.addWidget(logo_label, alignment=Qt.AlignmentFlag.AlignLeft)
+        self.banner_title = QLabel("Benvenuto nel tuo coach virtuale")
         self.banner_title.setObjectName("bannerTitle")
         self.banner_title.setStyleSheet("font-size: 28px; font-weight: 700;")
-        banner_layout.addWidget(self.banner_title)
+        logo_row.addWidget(self.banner_title, alignment=Qt.AlignmentFlag.AlignLeft)
+        logo_row.addStretch(1)
+        banner_layout.addLayout(logo_row)
         self.banner_subtitle = QLabel("Configura le API key per sbloccare le funzionalita avanzate.")
         self.banner_subtitle.setStyleSheet(f"font-size: 15px; color: {TEXT_MUTED};")
         banner_layout.addWidget(self.banner_subtitle)
@@ -499,7 +644,7 @@ class HomePage(QWidget):
 
     def update_metrics(self, metrics: Optional[Dict[str, str]], api_ready: bool) -> None:
         if not api_ready:
-            self.alert_label.setText("API key mancanti: inseriscile nelle impostazioni per attivare il coach.")
+            self.alert_label.setText("API key Google AI Studio mancante: inseriscila nelle impostazioni per attivare il coach.")
         else:
             self.alert_label.setText("")
         if not metrics:
@@ -691,6 +836,11 @@ class CoachPage(QWidget):
         self.info_label = QLabel("")
         self.info_label.setStyleSheet(f"color: {ACCENT_GLOW}; font-size: 14px;")
         card_layout.addWidget(self.info_label)
+        self._updating_tts = False
+        self.tts_toggle = QCheckBox("Abilita feedback vocale (ElevenLabs)")
+        self.tts_toggle.setChecked(self.env_manager.values.get("ENABLE_TTS", "0") == "1")
+        self.tts_toggle.stateChanged.connect(self._on_tts_toggle)
+        card_layout.addWidget(self.tts_toggle)
 
         row = QHBoxLayout()
         self.simulation_input = QLineEdit(self)
@@ -731,13 +881,23 @@ class CoachPage(QWidget):
         default_sim = self.env_manager.get_install_dir() / "data" / "simulations" / "sample_lap.jsonl"
         if not self.simulation_input.text().strip():
             self.simulation_input.setText(str(default_sim))
+        self._updating_tts = True
+        self.tts_toggle.setChecked(self.env_manager.values.get("ENABLE_TTS", "0") == "1")
+        self._updating_tts = False
 
     def set_enabled(self, enabled: bool) -> None:
         self.start_btn.setEnabled(enabled)
+        self.tts_toggle.setEnabled(enabled)
         if not enabled:
-            self.info_label.setText("Inserisci le API key nella sezione Impostazioni per attivare il coach.")
+            self.info_label.setText("Inserisci la Google AI Studio API key nella sezione Impostazioni per attivare il coach.")
         else:
             self.info_label.setText("Seleziona un file di simulazione o collega ACC e avvia i servizi.")
+
+    def _on_tts_toggle(self, state: int) -> None:
+        if self._updating_tts:
+            return
+        enabled = state == int(Qt.CheckState.Checked)
+        self.env_manager.update({"ENABLE_TTS": "1" if enabled else "0"})
 
     def _select_simulation(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
@@ -751,7 +911,11 @@ class CoachPage(QWidget):
 
     def _start_services(self) -> None:
         if not self.env_manager.has_required_api_keys():
-            QMessageBox.warning(self, "API mancanti", "Inserisci le API key obbligatorie prima di avviare il coach.")
+            QMessageBox.warning(
+                self,
+                "API mancanti",
+                "Inserisci la Google AI Studio API key obbligatoria prima di avviare il coach.",
+            )
             return
         path = Path(self.simulation_input.text().strip())
         self.controller.start(path)
@@ -769,11 +933,299 @@ class CoachPage(QWidget):
         self.status_label.setText(status)
 
 
+class LapAnalysisPage(QWidget):
+    def __init__(self, env_manager: EnvManager, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.env_manager = env_manager
+        self.analysis_data: dict[str, dict[str, dict]] = {}
+        self.current_track: Optional[str] = None
+        self.current_car: Optional[str] = None
+        self.current_analysis: Optional[dict[str, object]] = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(18)
+
+        filter_card = QFrame()
+        filter_card.setObjectName("card")
+        filter_card.setFrameShape(QFrame.Shape.NoFrame)
+        filter_layout = QVBoxLayout(filter_card)
+        filter_layout.setContentsMargins(28, 28, 28, 28)
+
+        title = QLabel("Lap Analysis")
+        title.setStyleSheet("font-size: 24px; font-weight: 700; letter-spacing: 0.05em;")
+        filter_layout.addWidget(title)
+
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(16)
+
+        self.track_combo = QComboBox()
+        self.track_combo.setPlaceholderText("Seleziona pista")
+        track_col = QVBoxLayout()
+        track_label = QLabel("Pista")
+        track_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 13px;")
+        track_col.addWidget(track_label)
+        track_col.addWidget(self.track_combo)
+        filter_row.addLayout(track_col, stretch=1)
+
+        self.car_combo = QComboBox()
+        self.car_combo.setPlaceholderText("Seleziona vettura")
+        car_col = QVBoxLayout()
+        car_label = QLabel("Vettura")
+        car_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 13px;")
+        car_col.addWidget(car_label)
+        car_col.addWidget(self.car_combo)
+        filter_row.addLayout(car_col, stretch=1)
+
+        filter_layout.addLayout(filter_row)
+
+        self.ideal_label = QLabel("Giro ideale non disponibile")
+        self.ideal_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 14px;")
+        filter_layout.addWidget(self.ideal_label)
+
+        content_row = QHBoxLayout()
+        content_row.setSpacing(18)
+
+        self.lap_list = QListWidget()
+        self.lap_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.lap_list.setMinimumWidth(220)
+        content_row.addWidget(self.lap_list, stretch=0)
+
+        sector_column = QVBoxLayout()
+        sector_title = QLabel("Delta settori (vs giro ideale)")
+        sector_title.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 13px;")
+        sector_column.addWidget(sector_title)
+
+        sectors_row = QHBoxLayout()
+        sectors_row.setSpacing(12)
+        self.sector_labels: dict[str, QLabel] = {}
+        for sector in ("S1", "S2", "S3"):
+            sector_frame = QFrame()
+            sector_frame.setObjectName("card")
+            sector_frame.setFrameShape(QFrame.Shape.NoFrame)
+            sector_layout = QVBoxLayout(sector_frame)
+            sector_layout.setContentsMargins(18, 14, 18, 14)
+            sector_caption = QLabel(sector)
+            sector_caption.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 13px; letter-spacing: 0.08em;")
+            sector_value = QLabel("-")
+            sector_value.setStyleSheet("font-size: 20px; font-weight: 600;")
+            sector_layout.addWidget(sector_caption)
+            sector_layout.addWidget(sector_value)
+            sector_layout.addStretch(1)
+            sectors_row.addWidget(sector_frame)
+            self.sector_labels[sector] = sector_value
+        sector_column.addLayout(sectors_row)
+        sector_column.addStretch(1)
+        content_row.addLayout(sector_column, stretch=1)
+
+        filter_layout.addLayout(content_row)
+
+        self.state_label = QLabel("Seleziona pista e vettura per iniziare.")
+        self.state_label.setStyleSheet(f"color: {ACCENT_GLOW}; font-size: 13px;")
+        filter_layout.addWidget(self.state_label)
+
+        layout.addWidget(filter_card)
+
+        table_card = QFrame()
+        table_card.setObjectName("card")
+        table_card.setFrameShape(QFrame.Shape.NoFrame)
+        table_layout = QVBoxLayout(table_card)
+        table_layout.setContentsMargins(28, 28, 28, 28)
+
+        table_title = QLabel("Delta tempo curva per curva")
+        table_title.setStyleSheet("font-size: 20px; font-weight: 600;")
+        table_layout.addWidget(table_title)
+
+        self.delta_table = QTableWidget(0, 3)
+        self.delta_table.setHorizontalHeaderLabels(["Curva", "Settore", "Delta (ms)"])
+        self.delta_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.delta_table.verticalHeader().setVisible(False)
+        self.delta_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.delta_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        table_layout.addWidget(self.delta_table)
+
+        layout.addWidget(table_card)
+        layout.addStretch(1)
+
+        self.track_combo.setEnabled(False)
+        self.car_combo.setEnabled(False)
+        self._clear_display()
+
+        self.track_combo.currentTextChanged.connect(self._on_track_changed)
+        self.car_combo.currentTextChanged.connect(self._on_car_changed)
+        self.lap_list.currentRowChanged.connect(self._on_lap_selected)
+
+    def refresh(self) -> None:
+        self.analysis_data = load_lap_analysis_data(self.env_manager)
+        self._populate_filters()
+
+    def _populate_filters(self) -> None:
+        self.track_combo.blockSignals(True)
+        self.track_combo.clear()
+        if not self.analysis_data:
+            self.track_combo.setEnabled(False)
+            self.car_combo.setEnabled(False)
+            self._clear_display()
+            self._set_message("Nessuna telemetria disponibile.")
+            self.track_combo.blockSignals(False)
+            return
+        for track in sorted(self.analysis_data.keys()):
+            self.track_combo.addItem(track)
+        self.track_combo.setEnabled(True)
+        self.track_combo.blockSignals(False)
+        self.track_combo.setCurrentIndex(0)
+        self._on_track_changed(self.track_combo.currentText())
+
+    def _on_track_changed(self, track: str) -> None:
+        self.current_track = track
+        cars = sorted(self.analysis_data.get(track, {}).keys()) if track in self.analysis_data else []
+        self.car_combo.blockSignals(True)
+        self.car_combo.clear()
+        if not cars:
+            self.car_combo.setEnabled(False)
+            self.car_combo.blockSignals(False)
+            self._clear_display()
+            self._set_message("Nessun giro disponibile per la pista selezionata.")
+            return
+        for car in cars:
+            self.car_combo.addItem(car)
+        self.car_combo.setEnabled(True)
+        self.car_combo.blockSignals(False)
+        self.car_combo.setCurrentIndex(0)
+        self._on_car_changed(self.car_combo.currentText())
+
+    def _on_car_changed(self, car: str) -> None:
+        self.current_car = car
+        track = self.current_track
+        analysis = self.analysis_data.get(track, {}).get(car) if track else None
+        self.current_analysis = analysis
+        self.lap_list.blockSignals(True)
+        self.lap_list.clear()
+        if not analysis or not analysis.get("laps"):
+            self.lap_list.blockSignals(False)
+            self._clear_table()
+            self._set_message("Nessun giro registrato per la combinazione selezionata.")
+            self.ideal_label.setText("Giro ideale non disponibile")
+            return
+        laps = sorted(analysis["laps"], key=lambda lap: lap.get("lap_number") or 0)
+        for lap in laps:
+            item_text = f"Lap {lap.get('lap_number', '?')} - {format_lap_time(lap.get('lap_time_ms'))}"
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.ItemDataRole.UserRole, lap)
+            self.lap_list.addItem(item)
+        self.lap_list.blockSignals(False)
+        ideal = analysis.get("ideal")
+        if ideal:
+            self.ideal_label.setText(
+                f"Giro ideale Lap {ideal.get('lap_number', '?')} - {format_lap_time(ideal.get('lap_time_ms'))}"
+            )
+        else:
+            self.ideal_label.setText("Giro ideale non disponibile")
+        self._set_message("Seleziona un giro da confrontare con il giro ideale.")
+        if self.lap_list.count():
+            self.lap_list.setCurrentRow(0)
+
+    def _on_lap_selected(self, row: int) -> None:
+        if self.current_analysis is None or row < 0:
+            self._clear_table()
+            return
+        item = self.lap_list.item(row)
+        if item is None:
+            self._clear_table()
+            return
+        lap_data = item.data(Qt.ItemDataRole.UserRole)
+        ideal = self.current_analysis.get("ideal") if self.current_analysis else None
+        self._update_sector_summary(lap_data, ideal)
+        self._update_delta_table(lap_data, ideal)
+
+    def _update_delta_table(self, lap: dict, ideal: Optional[dict]) -> None:
+        sections = lap.get("sections") or []
+        ideal_map = {}
+        if ideal and ideal.get("sections"):
+            ideal_map = {sec.get("section_id"): sec for sec in ideal["sections"]}
+        self.delta_table.setRowCount(len(sections))
+        for idx, section in enumerate(sections):
+            name = section.get("name") or section.get("section_id") or f"Curva {idx + 1}"
+            sector = self._sector_from_index(idx, len(sections))
+            current_delta = section.get("delta_time_ms")
+            baseline = None
+            if ideal_map:
+                ref = ideal_map.get(section.get("section_id"))
+                if ref is not None:
+                    baseline = ref.get("delta_time_ms")
+            delta_value = None
+            if current_delta is not None:
+                delta_value = float(current_delta)
+                if baseline is not None:
+                    delta_value -= float(baseline)
+            self.delta_table.setItem(idx, 0, QTableWidgetItem(name))
+            self.delta_table.setItem(idx, 1, QTableWidgetItem(sector))
+            self.delta_table.setItem(idx, 2, QTableWidgetItem(self._format_delta(delta_value)))
+        if not sections:
+            self.delta_table.setRowCount(0)
+
+    def _update_sector_summary(self, lap: dict, ideal: Optional[dict]) -> None:
+        sections = lap.get("sections") or []
+        total_sections = len(sections)
+        ideal_map = {}
+        if ideal and ideal.get("sections"):
+            ideal_map = {sec.get("section_id"): sec for sec in ideal["sections"]}
+        chunk = max(1, math.ceil(total_sections / 3)) if total_sections else 1
+        for index, sector in enumerate(("S1", "S2", "S3")):
+            start = index * chunk
+            end = total_sections if index == 2 else min(total_sections, (index + 1) * chunk)
+            subset = sections[start:end]
+            if not subset:
+                self.sector_labels[sector].setText("-")
+                continue
+            value = 0.0
+            for sec in subset:
+                current = sec.get("delta_time_ms") or 0.0
+                baseline = 0.0
+                if ideal_map:
+                    ref = ideal_map.get(sec.get("section_id"))
+                    if ref and ref.get("delta_time_ms") is not None:
+                        baseline = float(ref["delta_time_ms"])
+                value += float(current) - baseline
+            self.sector_labels[sector].setText(self._format_delta(value))
+
+    def _sector_from_index(self, index: int, total: int) -> str:
+        if total <= 0:
+            return "S1"
+        threshold = math.ceil(total / 3)
+        if index < threshold:
+            return "S1"
+        if index < threshold * 2:
+            return "S2"
+        return "S3"
+
+    def _format_delta(self, value: Optional[float]) -> str:
+        if value is None:
+            return "-"
+        return f"{value:+.0f} ms"
+
+    def _set_message(self, text: str) -> None:
+        self.state_label.setText(text)
+
+    def _clear_display(self) -> None:
+        self._clear_table()
+        for label in self.sector_labels.values():
+            label.setText("-")
+        self.lap_list.clear()
+        self.ideal_label.setText("Giro ideale non disponibile")
+
+    def _clear_table(self) -> None:
+        self.delta_table.setRowCount(0)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("ACC Coach AI - Desktop")
         self.resize(1080, 720)
+        window_icon = load_app_icon()
+        if not window_icon.isNull():
+            self.setWindowIcon(window_icon)
 
         self.env_manager = EnvManager()
         self.service_controller = ServiceController()
@@ -787,9 +1239,10 @@ class MainWindow(QMainWindow):
         self.sidebar = Sidebar(
             {
                 "home": "Dashboard",
+                "coach": "Coach AI",
+                "analysis": "Lap Analysis",
                 "download": "Download",
                 "settings": "Impostazioni",
-                "coach": "Coach AI",
             }
         )
         self.sidebar.selection_changed.connect(self._on_menu_selected)
@@ -811,19 +1264,22 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(container)
 
         self.home_page = HomePage(self.env_manager)
+        self.coach_page = CoachPage(self.env_manager, self.service_controller)
+        self.lap_analysis_page = LapAnalysisPage(self.env_manager)
         self.download_page = DownloadPage(self.env_manager)
         self.config_page = ConfigPage(self.env_manager)
-        self.coach_page = CoachPage(self.env_manager, self.service_controller)
 
         self.stack.addWidget(self.home_page)
+        self.stack.addWidget(self.coach_page)
+        self.stack.addWidget(self.lap_analysis_page)
         self.stack.addWidget(self.download_page)
         self.stack.addWidget(self.config_page)
-        self.stack.addWidget(self.coach_page)
 
         self.download_page.download_requested.connect(self._start_download)
         self.config_page.values_saved.connect(self._apply_updates)
 
         self.apply_theme()
+        self.lap_analysis_page.refresh()
         self.sidebar.select("home")
         self.stack.setCurrentIndex(0)
         self.refresh_home()
@@ -844,18 +1300,23 @@ class MainWindow(QMainWindow):
         QFrame#card {{
             background-color: {CARD_BG};
             border-radius: 20px;
-            border: 1px solid #1b1b1b;
+            border: none;
+            box-shadow: none;
         }}
-        QLabel#cardValue {{
-            font-size: 32px;
-            font-weight: 600;
-        }}
-            padding-left: 12px;
+        QFrame#card QLabel {{
+            background-color: transparent;
+            border: none;
+            text-shadow: none;
         }}
         QLabel#cardValue {{
             color: {TEXT_PRIMARY};
             font-size: 32px;
             font-weight: 600;
+            text-shadow: none;
+            padding-left: 12px;
+        }}
+        QLabel {{
+            text-shadow: none;
         }}
         QPushButton {{
             background-color: {SECONDARY_BG};
@@ -864,6 +1325,7 @@ class MainWindow(QMainWindow):
             padding: 10px 16px;
             color: {TEXT_PRIMARY};
             font-size: 15px;
+            box-shadow: none;
         }}
         QPushButton:hover {{
             background-color: {ACCENT_RED_HOVER};
@@ -903,8 +1365,9 @@ class MainWindow(QMainWindow):
             background-color: {SECONDARY_BG};
             border-radius: 10px;
             padding: 8px 12px;
-            border: 1px solid rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.06);
             color: {TEXT_PRIMARY};
+            box-shadow: none;
         }}
         QComboBox::drop-down {{
             border: none;
@@ -913,7 +1376,8 @@ class MainWindow(QMainWindow):
             background-color: {SECONDARY_BG};
             border-radius: 12px;
             padding: 12px;
-            border: 1px solid rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.06);
+            box-shadow: none;
         }}
         QScrollBar:vertical {{
             background: transparent;
@@ -928,23 +1392,27 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(style)
 
     def _on_menu_selected(self, key: str) -> None:
-        index_map = {"home": 0, "download": 1, "settings": 2, "coach": 3}
+        index_map = {"home": 0, "coach": 1, "analysis": 2, "download": 3, "settings": 4}
         titles = {
             "home": "Dashboard",
+            "coach": "Coach AI",
+            "analysis": "Lap Analysis",
             "download": "Download e aggiornamento",
             "settings": "Impostazioni",
-            "coach": "Coach AI",
         }
         self.header_label.setText(titles.get(key, ""))
         if key == "home":
             self.refresh_home()
+        elif key == "coach":
+            self.coach_page.refresh()
+        elif key == "analysis":
+            self.lap_analysis_page.refresh()
         elif key == "download":
             self.download_page.refresh()
         elif key == "settings":
             self.config_page.refresh()
-        elif key == "coach":
-            self.coach_page.refresh()
-        self.stack.setCurrentIndex(index_map[key])
+        if key in index_map:
+            self.stack.setCurrentIndex(index_map[key])
 
     def refresh_home(self) -> None:
         metrics = get_last_session_summary(self.env_manager)
@@ -960,6 +1428,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Configurazione salvata", 3000)
         self.update_availability()
         self.refresh_home()
+        self.lap_analysis_page.refresh()
 
     def _start_download(self, url: str, target: str) -> None:
         self.env_manager.update({"REPO_ZIP_URL": url, "INSTALL_DIR": target})
@@ -979,6 +1448,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Download completato", message)
             self.statusBar().showMessage("Download completato", 3000)
             self.refresh_home()
+            self.lap_analysis_page.refresh()
         else:
             QMessageBox.critical(self, "Errore download", message)
             self.statusBar().showMessage("Errore download", 3000)
@@ -990,6 +1460,9 @@ class MainWindow(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
+    app_icon = load_app_icon()
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

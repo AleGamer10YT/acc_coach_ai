@@ -23,6 +23,7 @@ dependencies = [
     "python-dateutil==2.9.0",
     "aiofiles==23.2.1",
     "PySide6==6.7.0",
+    "google-generativeai==0.7.2",
 ]
 
 [tool.setuptools.packages.find]

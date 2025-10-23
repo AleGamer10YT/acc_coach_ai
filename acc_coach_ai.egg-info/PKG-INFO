@@ -59,7 +59,7 @@ Share the generated `.exe` directly—PyInstaller bundles PySide6 and every runt
 ## Typical Workflow
 
 1. **Download** – open the “Download” section and provide the GitHub ZIP URL (branch or release). The launcher will fetch or update the local install directory.
-2. **Settings** – enter the required API keys (e.g. `OPENAI_API_KEY`) and save. Until the keys are present, the Coach section remains disabled to avoid accidental runs.
+2. **Settings** – enter the required API keys (e.g. `GOOGLE_API_KEY`) and save. Until the keys are present, the Coach section remains disabled to avoid accidental runs.
 3. **Coach** – choose a telemetry source:
    - play back the sample session stored in `data/simulations/sample_lap.jsonl`, or  
    - connect to live ACC telemetry.
